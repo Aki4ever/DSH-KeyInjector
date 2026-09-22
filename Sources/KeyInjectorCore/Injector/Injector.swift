@@ -433,7 +433,7 @@ public struct RollbackOutcome: Sendable {
 
 public final class InjectionEngine {
     private let audit: AuditLog
-    private let backups: BackupStore
+    let backups: BackupStore
 
     public init(audit: AuditLog, backups: BackupStore) {
         self.audit = audit
@@ -621,6 +621,11 @@ public final class InjectionEngine {
             return ApplyOutcome(success: false, filePath: path, backupPath: record.backupPath, metaPath: record.backupPath.map { BackupStore.metaPath(forBackup: $0) }, verifiedFingerprint: fp, message: "写后读回校验不一致")
         }
 
+        // 若注入目标是 Codex 相关，同步自动确保模型目录与 model_catalog_json 注册到位
+        if plan.target.id == "codex-cli" || path.contains(".codex") {
+            Self.syncCodexModelCatalogIfAvailable(keyRecord: plan.keyRecord)
+        }
+
         try? audit.append(AuditEntry(
             action: .inject,
             result: "success",
@@ -641,6 +646,175 @@ public final class InjectionEngine {
             verifiedFingerprint: fp,
             message: record.existed ? "注入成功，原文件已备份" : "注入成功，已新建目标文件"
         )
+    }
+
+    /// 同步更新 Codex 桌面端的 model_catalog_json 与 model_providers，确保下拉菜单立即可见
+    private static func syncCodexModelCatalogIfAvailable(keyRecord: KeyRecord) {
+        let codexDir = PathKit.expand("~/.codex")
+        let configPath = PathKit.expand("~/.codex/config.toml")
+        let catalogPath = PathKit.expand("~/.codex/codex-gateway-models.json")
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: configPath) else { return }
+
+        // 1. 确保 codex-gateway-models.json 存在
+        if !fm.fileExists(atPath: catalogPath) {
+            let bundledCmd = "/Applications/ChatGPT.app/Contents/Resources/codex"
+            if fm.fileExists(atPath: bundledCmd) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                p.arguments = ["-c", """
+import json, subprocess
+from pathlib import Path
+try:
+    raw = subprocess.check_output(['/Applications/ChatGPT.app/Contents/Resources/codex', 'debug', 'models', '--bundled'], text=True)
+    models = json.loads(raw).get('models', [])
+    template = next((m for m in models if m.get('slug') == 'gpt-5.6-luna'), models[0])
+    for cm in [
+        {'slug': 'ark/DeepSeek-V4.1-Flash', 'display_name': 'DeepSeek V4.1（公司网关）', 'priority': 100},
+        {'slug': 'gemini-3.8-flash-high', 'display_name': 'Gemini 3.8 Flash（公司网关）', 'priority': 99}
+    ]:
+        entry = json.loads(json.dumps(template))
+        entry['slug'] = cm['slug']
+        entry['display_name'] = cm['display_name']
+        entry['visibility'] = 'list'
+        entry['supported_in_api'] = True
+        entry['priority'] = cm['priority']
+        models.insert(0, entry)
+    Path('\(catalogPath)').write_text(json.dumps({'models': models}, ensure_ascii=False, indent=2), encoding='utf-8')
+except Exception:
+    pass
+"""]
+                try? p.run()
+                p.waitUntilExit()
+            }
+        }
+
+        // 2. 确保 config.toml 包含 model_catalog_json 注册
+        if let text = try? String(contentsOfFile: configPath, encoding: .utf8) {
+            var updated = text
+            if !updated.contains("model_catalog_json") {
+                updated = "model_catalog_json = \"\(catalogPath)\"\n" + updated
+            }
+            if !updated.contains("[model_providers.codex_gateway]") {
+                let base = keyRecord.baseURL ?? "http://192.168.1.200:8080/v1"
+                let block = """
+
+# BEGIN CODEX-GATEWAY MANAGED
+[model_providers.codex_gateway]
+name = "Company AI Gateway"
+base_url = "\(base)"
+wire_api = "responses"
+request_max_retries = 2
+stream_max_retries = 2
+
+[model_providers.codex_gateway.auth]
+command = "/Users/linqiyu/Documents/ChatGPT/对接gemini/bin/codex-gateway"
+args = ["auth", "print"]
+timeout_ms = 5000
+refresh_interval_ms = 0
+# END CODEX-GATEWAY MANAGED
+"""
+                updated = updated.trimmingCharacters(in: .whitespacesAndNewlines) + "\n" + block
+            }
+            updated = Self.ensureCodexGatewayProviderRouting(updated, catalogPath: catalogPath)
+            if updated != text {
+                try? AtomicWriter.write(updated, to: URL(fileURLWithPath: configPath), preservePermissionsFrom: URL(fileURLWithPath: configPath))
+            }
+        }
+    }
+
+    /// 受管区块标记：桌面端选中网关模型时必须同时锁定 provider，否则请求会退回 openai provider，
+    /// 被 ChatGPT 后端拒绝为 “model is not supported when using Codex with a ChatGPT account”。
+    public static let codexDesktopBlockStart = "# BEGIN CODEX-GATEWAY DESKTOP"
+    public static let codexDesktopBlockEnd = "# END CODEX-GATEWAY DESKTOP"
+
+    /// 判断当前 config.toml 是否已经把网关模型路由到 `codex_gateway`
+    public static func codexGatewayRoutingOK(_ configText: String, catalogPath: String) -> Bool {
+        guard let model = firstModelSlug(in: configText),
+              GatewayCatalog.isGatewayModel(model, catalogPath: catalogPath) else { return true }
+        return firstAssignmentValue("model_provider", in: configText) == "codex_gateway"
+    }
+
+    /// 当 `model` 指向公司网关模型、但 `model_provider` 缺失或仍为官方 provider 时，
+    /// 重写受管区块把 `model_provider` 指回 `codex_gateway`。
+    /// 只搬动 `model` / `model_provider` 两个键，顶层其它设置（推理档位、沙箱、通知等）原样保留；
+    /// 纯函数：只做字符串变换，便于单元测试与 dry-run。
+    public static func ensureCodexGatewayProviderRouting(_ configText: String, catalogPath: String) -> String {
+        guard let model = firstModelSlug(in: configText) else { return configText }
+        guard GatewayCatalog.isGatewayModel(model, catalogPath: catalogPath) else { return configText }
+
+        let currentProvider = firstAssignmentValue("model_provider", in: configText)
+        if let currentProvider, currentProvider != "codex_gateway" && currentProvider != "openai" {
+            // 用户显式指定了其它第三方 provider，不动
+            return configText
+        }
+        if currentProvider == "codex_gateway" && configText.contains(codexDesktopBlockStart) {
+            return configText
+        }
+
+        var body = removeManagedBlock(from: configText)
+        body = removeTopLevelAssignment("model", from: body)
+        body = removeTopLevelAssignment("model_provider", from: body)
+        body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let block = """
+        \(codexDesktopBlockStart)
+        model = "\(model)"
+        model_provider = "codex_gateway"
+        \(codexDesktopBlockEnd)
+        """
+        var lines = body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let insertAt = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") }) ?? lines.count
+        var insertion = block.split(separator: "\n").map(String.init)
+        // 与下方的 [section] 之间保留空行，避免受管区块被视觉上粘进该表
+        if insertAt < lines.count { insertion.append("") }
+        lines.insert(contentsOf: insertion, at: insertAt)
+        return lines.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    /// 读取 config.toml 里第一个顶层（非注释）`model = "..."` 的取值
+    static func firstModelSlug(in configText: String) -> String? {
+        firstAssignmentValue("model", in: configText)
+    }
+
+    /// 取顶层键的字符串取值；进入任意 `[section]` 之后即停止，避免误读 provider 内部同名字段
+    static func firstAssignmentValue(_ key: String, in configText: String) -> String? {
+        for rawLine in configText.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { return nil }
+            if line.hasPrefix("#") || line.isEmpty { continue }
+            guard line.hasPrefix(key) else { continue }
+            let rest = line.dropFirst(key.count).trimmingCharacters(in: .whitespaces)
+            guard rest.hasPrefix("=") else { continue }
+            return rest.dropFirst().trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        }
+        return nil
+    }
+
+    static func removeManagedBlock(from text: String) -> String {
+        guard let start = text.range(of: codexDesktopBlockStart),
+              let end = text.range(of: codexDesktopBlockEnd, range: start.upperBound..<text.endIndex) else {
+            return text
+        }
+        var result = text
+        result.removeSubrange(start.lowerBound..<end.upperBound)
+        return result
+    }
+
+    /// 删除顶层（首个 `[section]` 之前）的某个键赋值行
+    static func removeTopLevelAssignment(_ key: String, from text: String) -> String {
+        var output: [String] = []
+        var inSection = false
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { inSection = true }
+            if !inSection, line.hasPrefix(key), line.dropFirst(key.count).trimmingCharacters(in: .whitespaces).hasPrefix("=") {
+                continue
+            }
+            output.append(String(rawLine))
+        }
+        return output.joined(separator: "\n")
     }
 
     /// 回滚：依据审计条目还原备份，或删除当初新建的文件

@@ -14,7 +14,10 @@
     <div class="brand">
       <div class="brand-mark">K</div>
       <div class="brand-text">
-        <div class="brand-title">Key 注入器</div>
+        <div class="brand-title-row">
+          <span class="brand-title">Key 注入器</span>
+          <span class="brand-version-badge" id="app-version-badge">v1.1.0</span>
+        </div>
         <div class="brand-sub">AI 密钥管理与配置注入</div>
       </div>
     </div>
@@ -54,6 +57,7 @@
           <p class="sub">明文只存在本机密钥后端，配置文件与审计日志中仅出现掩码与指纹</p>
         </div>
         <div class="head-actions">
+          <span class="version-pill" id="global-version-pill"><span class="pulse-dot"></span>v1.1.0 已就绪</span>
           <label class="switch"><input type="checkbox" id="reveal-toggle"><span></span>显示明文</label>
           <button class="btn" id="btn-check-all">全部探测</button>
           <button class="btn primary" id="btn-add-key">＋ 新增密钥</button>
@@ -66,13 +70,23 @@
       <header class="page-head">
         <div>
           <h1>注入中心</h1>
-          <p class="sub">先生成注入计划（dry-run）核对差异，再决定是否写入；写入前自动备份</p>
+          <p class="sub">可视化选择 DSH / Codex / Claude 等桌面端与开发环境，核对差异后原子写入，支持自动备份与一键回滚</p>
         </div>
         <div class="head-actions">
           <label class="switch"><input type="checkbox" id="reveal-toggle-inject"><span></span>显示明文</label>
+          <button class="btn primary" id="btn-add-target">＋ 扩展落点</button>
         </div>
       </header>
       <div class="scroll">
+        <!-- 一键极简注入 Action Bar -->
+        <div class="card one-click-bar">
+          <div class="one-click-info">
+            <div class="one-click-title">⚡ 一键注入生效</div>
+            <div class="one-click-sub" id="one-click-desc">选择下方落点，点击右侧按钮即可全自动完成匹配、备份与原子写入</div>
+          </div>
+          <button class="btn primary one-click-btn" id="btn-one-click-apply">⚡ 一键注入生效</button>
+        </div>
+
         <div class="card" id="inject-picker"></div>
         <div id="plan-host"></div>
         <div class="card" id="rollback-host"></div>
@@ -129,11 +143,14 @@
   </main>
 </div>
 
-<!-- 新增密钥弹窗 -->
+<!-- 密钥管理弹窗（新增 / 可视化编辑） -->
 <div class="modal-mask hidden" id="modal-mask">
   <div class="modal">
     <div class="modal-head">
-      <h2>新增密钥</h2>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <h2 id="modal-title">新增密钥</h2>
+        <span class="brand-version-badge" id="modal-version-tag">v1.1.0</span>
+      </div>
       <button class="icon-btn" id="modal-close">✕</button>
     </div>
     <div class="modal-body">
@@ -141,28 +158,93 @@
         <select id="f-provider"></select>
       </label>
       <div class="provider-card" id="f-provider-info"></div>
-      <label class="field"><span>别名</span>
+      <label class="field"><span>别名 / 名称</span>
         <input type="text" id="f-label" placeholder="例如：主力 Key / 备用额度包">
       </label>
+      <label class="field"><span>API 基址 / 代理端点地址 (Base URL)</span>
+        <input type="text" id="f-base-url" placeholder="留空使用官方默认；中转/中间商请填代理地址（如 https://api.relay.com/v1）">
+        <div class="dim small" id="f-base-url-hint" style="margin-top:4px;"></div>
+      </label>
       <label class="field"><span>密钥明文</span>
-        <input type="password" id="f-secret" placeholder="粘贴 API Key（仅保存在本机密钥后端）">
+        <div class="secret-input-wrap">
+          <input type="password" id="f-secret" placeholder="粘贴 API Key（仅保存在本机密钥后端）">
+          <button type="button" class="icon-btn toggle-pwd" id="f-secret-toggle" title="显示/隐藏明文">👁️</button>
+        </div>
+        <div class="dim small" id="f-secret-hint" style="margin-top:4px;"></div>
       </label>
       <div class="warn-box hidden" id="f-warnings"></div>
-      <label class="field"><span>优先级（数值越小越优先）</span>
-        <input type="number" id="f-priority" value="100" min="0" max="999">
-      </label>
-      <label class="field"><span>标签（逗号分隔）</span>
-        <input type="text" id="f-tags" placeholder="例如：生产,备用">
-      </label>
-      <label class="field"><span>备注</span>
-        <input type="text" id="f-note" placeholder="可选">
+      <div class="grid-2">
+        <label class="field"><span>优先级（数值越小越优先）</span>
+          <input type="number" id="f-priority" value="100" min="0" max="999">
+        </label>
+        <label class="field"><span>标签（逗号分隔）</span>
+          <input type="text" id="f-tags" placeholder="例如：生产,备用">
+        </label>
+      </div>
+      <label class="field"><span>备注说明</span>
+        <input type="text" id="f-note" placeholder="可选备注信息">
       </label>
     </div>
     <div class="modal-foot">
-      <span class="dim small">明文不会写入 vault.json，只保存掩码与指纹</span>
+      <span class="dim small">明文仅安全保存于系统安全凭证后端</span>
       <div>
         <button class="btn" id="modal-cancel">取消</button>
         <button class="btn primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 扩展注入落点弹窗 -->
+<div class="modal-mask hidden" id="modal-target-mask">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-target-title">扩展注入落点</h2>
+      <button class="icon-btn" id="modal-target-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="grid-2">
+        <label class="field"><span>落点名称</span>
+          <input type="text" id="tf-name" placeholder="例如：我的工作台配置 / Codex 新端点">
+        </label>
+        <label class="field"><span>适用厂商（可选）</span>
+          <select id="tf-provider"></select>
+        </label>
+      </div>
+      <label class="field"><span>写入文件格式</span>
+        <select id="tf-format">
+          <option value="json">JSON 配置文件（按键路径定点替换）</option>
+          <option value="yaml">YAML 配置文件（区块 + 键定点行替换）</option>
+          <option value="toml">TOML 配置文件（[section] + 键定点行替换）</option>
+          <option value="dotenv">.env 文件（KEY=value 替换或追加）</option>
+          <option value="shellExport">Shell 启动脚本（~/.zshrc 等受管导出区块）</option>
+          <option value="plist">macOS Plist 属性列表</option>
+          <option value="none">仅生成导出片段（不写文件）</option>
+        </select>
+      </label>
+      <label class="field" id="tf-path-wrap"><span>目标文件绝对路径（支持 ~ 展开）</span>
+        <input type="text" id="tf-path" placeholder="例如：~/.config/myapp/credentials.json">
+      </label>
+      <div class="grid-2">
+        <label class="field" id="tf-jsonpath-wrap"><span>JSON 键路径（点号分隔）</span>
+          <input type="text" id="tf-jsonpath" placeholder="例如：auth.api_key 或 env.OPENAI_API_KEY">
+        </label>
+        <label class="field hidden" id="tf-section-wrap"><span>YAML / TOML 区块名</span>
+          <input type="text" id="tf-section" placeholder="例如：refs 或 openai">
+        </label>
+        <label class="field" id="tf-itemkey-wrap"><span>环境变量名 / 键名（留空按厂商默认）</span>
+          <input type="text" id="tf-itemkey" placeholder="例如：OPENAI_API_KEY">
+        </label>
+      </div>
+      <label class="field"><span>落点用途与安全边界说明</span>
+        <input type="text" id="tf-note" placeholder="例如：定点写入工作台 token 配置，避免与已有凭证冲突">
+      </label>
+    </div>
+    <div class="modal-foot">
+      <span class="dim small">扩展落点将持久化保存在本地配置中</span>
+      <div>
+        <button class="btn" id="modal-target-cancel">取消</button>
+        <button class="btn primary" id="modal-target-save">确认保存落点</button>
       </div>
     </div>
   </div>

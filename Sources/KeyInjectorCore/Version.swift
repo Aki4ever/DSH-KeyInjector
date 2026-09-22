@@ -8,7 +8,7 @@
 
 public enum AppVersion {
     /// 当前实施版本，必须与仓库根目录 VERSION 文件内容一致
-    public static let current = "1.0.0"
+    public static let current = "1.2.0"
 
     /// 产品名
     public static let productName = "KeyInjector"

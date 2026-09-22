@@ -66,9 +66,10 @@
     "healthPath" : "/models",
     "id" : "google",
     "name" : "Google Gemini",
-    "note" : "Gemini 走 ?key= 查询参数鉴权，注意避免把含密钥的完整 URL 粘进聊天记录。",
+    "note" : "Gemini 走 ?key= 或 Bearer 鉴权，支持 Google AI Studio (AIza) 及 Cloud/中转凭证 (AQ.)。",
     "secretPrefixes" : [
-      "AIza"
+      "AIza",
+      "AQ."
     ]
   },
   {

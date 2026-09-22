@@ -80,6 +80,11 @@ struct RedactionTests {
         let warnings = SecretValidator.warnings(secret: "AIzaSyWrongPrefixValue123", provider: provider)
         #expect(warnings.contains { $0.contains("开头") })
         #expect(SecretValidator.warnings(secret: "sk-1234567890abcdef", provider: provider).isEmpty)
+
+        let catalog = ProviderCatalog()
+        let gemini = catalog.provider(id: "google")!
+        #expect(SecretValidator.warnings(secret: "AIzaTESTONLYNOTAREALKEY", provider: gemini).isEmpty)
+        #expect(SecretValidator.warnings(secret: "AIzaSyD-1234567890abcdef", provider: gemini).isEmpty)
     }
 }
 
@@ -347,6 +352,49 @@ struct KeyVaultTests {
         #expect(updated.hint == Redaction.mask("sk-new-value-67890"))
     }
 
+    @Test("可视化编辑密钥名称与明文")
+    func updateKeyEditsLabelAndSecret() throws {
+        let tmp = TempDir()
+        let service = try tmp.makeService()
+        let record = try service.addKey(providerID: "deepseek", label: "旧名称", secret: "sk-initial-12345", priority: 100, tags: ["旧标签"], note: "旧备注")
+        
+        // 仅修改名称与标签，不修改明文
+        let metaUpdated = try service.updateKey(id: record.id, label: "新名称", secret: nil, priority: 50, tags: ["新标签"], note: "新备注")
+        #expect(metaUpdated.label == "新名称")
+        #expect(metaUpdated.priority == 50)
+        #expect(metaUpdated.tags == ["新标签"])
+        #expect(metaUpdated.note == "新备注")
+        #expect(try service.secret(for: record.id) == "sk-initial-12345")
+        
+        // 同时修改明文
+        let fullUpdated = try service.updateKey(id: record.id, label: "最终名称", secret: "sk-changed-99999")
+        #expect(fullUpdated.label == "最终名称")
+        #expect(try service.secret(for: record.id) == "sk-changed-99999")
+        #expect(fullUpdated.fingerprint != record.fingerprint)
+    }
+
+    @Test("动态扩展自定义注入落点")
+    func dynamicCustomTargetManagement() throws {
+        let tmp = TempDir()
+        let service = try tmp.makeService()
+        let target = InjectionTarget(
+            id: "my-custom-app",
+            name: "我的自定义工具",
+            providerID: "deepseek",
+            format: .json,
+            filePath: tmp.url.appendingPathComponent("custom.json").path,
+            jsonPath: ["auth", "token"],
+            isCustom: true,
+            note: "测试扩展落点"
+        )
+        try service.addCustomTarget(target)
+        #expect(service.target(id: "my-custom-app") != nil)
+        #expect(service.target(id: "my-custom-app")?.name == "我的自定义工具")
+
+        try service.removeCustomTarget(id: "my-custom-app")
+        #expect(service.target(id: "my-custom-app") == nil)
+    }
+
     @Test("优选密钥遵循启用状态与优先级")
     func preferredKeyHonoursEnabledAndPriority() throws {
         let tmp = TempDir()
@@ -573,6 +621,11 @@ struct HealthCheckerTests {
         let req3 = try #require(checker.makeRequest(provider: gemini, secret: "AIza-x"))
         #expect(req3.url?.absoluteString.contains("key=AIza-x") == true)
         #expect(req3.value(forHTTPHeaderField: "Authorization") == nil)
+
+        // Gemini 中间商 / AQ. 凭证支持自定义 BaseURL 并带 Bearer
+        let req4 = try #require(checker.makeRequest(provider: gemini, secret: "AIzaTESTONLYNOTAREALKEY", overrideBaseURL: "https://my-gemini-proxy.com/v1"))
+        #expect(req4.url?.host == "my-gemini-proxy.com")
+        #expect(req4.value(forHTTPHeaderField: "Authorization") == "Bearer AIzaTESTONLYNOTAREALKEY")
     }
 
     @Test("探测经传输层返回并带耗时")
@@ -614,7 +667,7 @@ struct CatalogTests {
         }
 
         let targets = TargetCatalog()
-        #expect(targets.targets.count >= 8)
+        #expect(targets.targets.count >= 2)
         for t in targets.targets {
             #expect(!t.note.isEmpty)
             // 非自定义的 JSON / plist 落点必须自带键路径；自定义落点的键路径由用户填写
@@ -641,5 +694,107 @@ struct CatalogTests {
         #expect(PathKit.expand("~/x/y") == home + "/x/y")
         #expect(PathKit.expand("$HOME/.zshrc") == home + "/.zshrc")
         #expect(PathKit.expand("/tmp/./a/../b") == "/tmp/b")
+    }
+}
+
+// MARK: - Codex 网关 provider 路由守护
+// 回归背景：桌面端把模型切成公司网关模型后，config.toml 只剩 `model` 却没有 `model_provider`，
+// 请求退回 openai provider，被 ChatGPT 后端拒绝为
+// “The '<model>' model is not supported when using Codex with a ChatGPT account.”
+
+@Suite("Codex 网关 provider 路由守护")
+struct CodexGatewayRoutingTests {
+
+    @Test("官方模型不做任何改动")
+    func officialModelUntouched() {
+        let text = """
+        model = "gpt-5.6-luna"
+        model_provider = "openai"
+
+        [features]
+        foo = true
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        #expect(out == text)
+    }
+
+    @Test("网关模型缺少 provider 时补写受管区块")
+    func gatewayModelGainsProvider() {
+        let text = """
+        model_catalog_json = "/tmp/catalog.json"
+        model = "ark/DeepSeek-V4.1-Flash"
+
+        [marketplaces.openai-bundled]
+        source_type = "local"
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        #expect(out.contains(InjectionEngine.codexDesktopBlockStart))
+        #expect(out.contains("model_provider = \"codex_gateway\""))
+        #expect(out.contains("model = \"ark/DeepSeek-V4.1-Flash\""))
+        // 受管区块必须落在第一个 [section] 之前，否则会被当成别的表内的键
+        let blockIndex = out.range(of: InjectionEngine.codexDesktopBlockStart)!.lowerBound
+        let sectionIndex = out.range(of: "[marketplaces.openai-bundled]")!.lowerBound
+        #expect(blockIndex < sectionIndex)
+        // 顶层 `model` 不重复
+        let topLevelModels = out.split(separator: "\n").prefix(while: { !$0.hasPrefix("[") })
+            .filter { $0.hasPrefix("model = ") }
+        #expect(topLevelModels.count == 1)
+    }
+
+    @Test("已有受管区块时保持幂等")
+    func idempotentWhenBlockExists() {
+        let text = """
+        model_provider = "codex_gateway"
+        # BEGIN CODEX-GATEWAY DESKTOP
+        model = "gemini-3.8-flash-high"
+        model_provider = "codex_gateway"
+        # END CODEX-GATEWAY DESKTOP
+
+        [features]
+        foo = true
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        #expect(out == text)
+    }
+
+    @Test("受管区块被改回官方 provider 时自动收敛")
+    func repairsTamperedBlock() {
+        let text = """
+        # BEGIN CODEX-GATEWAY DESKTOP
+        model = "gemini-3.8-flash-high"
+        model_provider = "openai"
+        # END CODEX-GATEWAY DESKTOP
+
+        [marketplaces.openai-bundled]
+        source_type = "local"
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        #expect(out.contains("model_provider = \"codex_gateway\""))
+        #expect(!out.contains("model_provider = \"openai\""))
+        #expect(out.components(separatedBy: InjectionEngine.codexDesktopBlockStart).count == 2)
+    }
+
+    @Test("用户显式选择的其它第三方 provider 不被覆盖")
+    func respectsThirdPartyProvider() {
+        let text = """
+        model = "gemini-3.8-flash-high"
+        model_provider = "my_own_gateway"
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        #expect(out == text)
+    }
+
+    @Test("目录内的网关标记条目同样被识别")
+    func catalogMarkerDetection() throws {
+        let tmp = TempDir()
+        let catalog = tmp.file("catalog.json", content: """
+        {"models": [
+          {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra"},
+          {"slug": "ark/kimi-k3", "display_name": "Kimi K3（公司网关）"}
+        ]}
+        """)
+        #expect(GatewayCatalog.isGatewayModel("ark/kimi-k3", catalogPath: catalog.path))
+        #expect(!GatewayCatalog.isGatewayModel("gpt-6-astra", catalogPath: catalog.path))
+        #expect(GatewayCatalog.isGatewayModel("ark/DeepSeek-V4.1-Flash", catalogPath: catalog.path))
     }
 }

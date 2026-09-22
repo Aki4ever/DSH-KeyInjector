@@ -55,12 +55,43 @@ const state = {
   reveal: false,
   auditFilter: 'all',
   info: {},
-  lastInjectForm: null
+  lastInjectForm: null,
+  selectedTargetID: '',
+  targetFilter: 'all',
+  editingKey: null,
+  editingTarget: null
 };
 
 /* ---------- 工具 ---------- */
 
 const $ = (sel) => document.querySelector(sel);
+
+function updateStepper(step) {
+  const el = $('#inject-stepper');
+  if (!el) return;
+  el.querySelectorAll('.step').forEach((s) => {
+    const sNum = parseInt(s.dataset.step, 10);
+    s.classList.toggle('active', sNum === step);
+    s.classList.toggle('done', sNum < step);
+  });
+}
+
+function getTargetCategory(t) {
+  if (t.isCustom) return 'custom';
+  if (t.id.includes('dsh') || t.id.includes('codex') || t.id.includes('claude')) return 'desktop';
+  if (t.id.includes('shell') || t.id.includes('dotenv') || t.format === 'dotenv' || t.format === 'shellExport') return 'dev';
+  return 'custom';
+}
+
+function getTargetIcon(t) {
+  if (t.id.includes('dsh')) return '🤖';
+  if (t.id.includes('codex')) return '⚡';
+  if (t.id.includes('claude')) return '🟣';
+  if (t.format === 'shellExport' || t.id.includes('shell')) return '🐚';
+  if (t.format === 'dotenv' || t.id.includes('dotenv')) return '📄';
+  if (t.format === 'plist') return '⚙️';
+  return '🧩';
+}
 
 function esc(s) {
   return String(s === undefined || s === null ? '' : s)
@@ -107,6 +138,13 @@ function switchPage(page) {
   document.querySelectorAll('.page').forEach((el) => {
     el.classList.toggle('hidden', el.id !== 'page-' + page);
   });
+  if (page === 'inject') {
+    renderInjectPicker();
+    renderPlan();
+    renderRollbackList();
+  } else if (page === 'keys') {
+    renderKeys();
+  }
 }
 
 document.querySelectorAll('.nav-item').forEach((el) => {
@@ -141,6 +179,10 @@ async function loadAudit() {
 function renderFoot() {
   $('#foot-backend').textContent = '密钥后端：' + (state.info.storeBackend || '—');
   $('#foot-counts').textContent = state.keys.length + ' 个密钥 · ' + state.targets.length + ' 个落点';
+  const ver = state.info.version ? ('v' + state.info.version) : 'v1.1.0';
+  if ($('#app-version-badge')) $('#app-version-badge').textContent = ver;
+  if ($('#global-version-pill')) $('#global-version-pill').innerHTML = '<span class="pulse-dot"></span>' + ver + ' 已就绪';
+  if ($('#modal-version-tag')) $('#modal-version-tag').textContent = ver;
 }
 
 function renderNavCounts() {
@@ -169,42 +211,47 @@ function renderKeys() {
     return;
   }
 
-  let html = '<div class="card">';
+  let html = '';
   state.keys.forEach((k) => {
     const st = (k.lastCheck || {}).status || 'unchecked';
     const stLabel = (k.lastCheck || {}).label || '未探测';
     const shown = state.reveal && k.secret ? k.secret : k.hint;
     html +=
-      '<div class="key-row">' +
-        '<span class="status ' + statusClass(st) + '" title="' + esc(stLabel) + '"></span>' +
-        '<div class="key-main">' +
-          '<div class="key-title">' +
-            '<span class="key-label">' + esc(k.label) + '</span>' +
+      '<div class="key-card" data-id="' + esc(k.id) + '">' +
+        '<div class="key-card-left">' +
+          '<div class="key-card-title-row">' +
+            '<span class="status ' + statusClass(st) + '" title="' + esc(stLabel) + '"></span>' +
+            '<span class="key-card-label">' + esc(k.label) + '</span>' +
             '<span class="chip">' + esc(providerName(k.providerID)) + '</span>' +
-            (k.enabled ? '' : '<span class="chip plain">已禁用</span>') +
+            '<span class="chip plain">优先级 ' + esc(k.priority) + '</span>' +
+            (k.enabled ? '' : '<span class="chip plain" style="color:var(--red)">已禁用</span>') +
             (k.tags || []).map((t) => '<span class="chip plain">' + esc(t) + '</span>').join('') +
           '</div>' +
-          '<div class="key-meta">' +
-            '<span>' + esc(shown) + '</span>' +
-            '<span>指纹 ' + esc(k.fingerprint) + '</span>' +
-            '<span class="' + statusTextClass(st) + '">' + esc(stLabel) +
-              (k.lastCheck && k.lastCheck.latencyMS ? ' · ' + k.lastCheck.latencyMS + 'ms' : '') + '</span>' +
-            '<span>优先级 ' + esc(k.priority) + '</span>' +
+          '<div class="key-secret-box">' +
+            '<span class="key-secret-text mono">' + esc(shown) + '</span>' +
+            '<button class="icon-btn" data-act="copy-secret" data-id="' + esc(k.id) + '" title="复制当前明文/掩码">📋</button>' +
+          '</div>' +
+          '<div class="key-card-sub">' +
+            (k.baseURL ? '<span>端点: <code class="mono" style="color:var(--accent)">' + esc(k.baseURL) + '</code></span>' : '') +
+            '<span>指纹: <code class="mono">' + esc(k.fingerprint) + '</code></span>' +
+            '<span class="' + statusTextClass(st) + '">● ' + esc(stLabel) +
+              (k.lastCheck && k.lastCheck.latencyMS ? ' (' + k.lastCheck.latencyMS + 'ms)' : '') + '</span>' +
+            (k.note ? '<span class="dim">备注: ' + esc(k.note) + '</span>' : '') +
+            '<span class="dim">更新于 ' + fmtTime(k.updatedAt || k.createdAt) + '</span>' +
           '</div>' +
         '</div>' +
-        '<div class="key-actions">' +
-          '<button class="btn small" data-act="check" data-id="' + esc(k.id) + '">探测</button>' +
-          '<button class="btn small" data-act="copy" data-id="' + esc(k.id) + '">复制指纹</button>' +
+        '<div class="key-card-dock">' +
+          '<button class="btn small" data-act="edit" data-id="' + esc(k.id) + '">✏️ 编辑</button>' +
+          '<button class="btn small" data-act="check" data-id="' + esc(k.id) + '">🩺 探测</button>' +
           '<label class="switch" title="启用/禁用"><input type="checkbox" data-act="toggle" data-id="' +
             esc(k.id) + '"' + (k.enabled ? ' checked' : '') + '><span></span></label>' +
           '<button class="icon-btn" data-act="delete" data-id="' + esc(k.id) + '" title="删除">🗑</button>' +
         '</div>' +
       '</div>';
   });
-  html += '</div>';
 
   if (state.reveal) {
-    html += '<div class="warn-box">⚠️ 当前正在显示完整明文，请注意屏幕共享与录屏。</div>';
+    html += '<div class="warn-box">⚠️ 当前正在显示完整明文，请注意屏幕共享与录屏安全。</div>';
   }
   host.innerHTML = html;
 }
@@ -216,7 +263,18 @@ $('#keys-host').addEventListener('click', async (e) => {
   const act = btn.dataset.act;
   const record = state.keys.find((k) => k.id === id);
   try {
-    if (act === 'check') {
+    if (act === 'edit') {
+      if (record) openModal('edit', record);
+    } else if (act === 'copy-secret') {
+      try {
+        const res = await call('revealSecret', { id: id });
+        await call('copy', { text: res.secret });
+        banner('success', '已将密钥明文复制到剪贴板');
+      } catch (err) {
+        await call('copy', { text: record ? record.hint : '' });
+        banner('info', '已将密钥掩码复制到剪贴板');
+      }
+    } else if (act === 'check') {
       banner('info', '正在探测…');
       const res = await call('checkKey', { id: id });
       banner(res.status === 'valid' ? 'success' : 'warning', '探测结果：' + res.label + ' — ' + res.message);
@@ -275,23 +333,65 @@ $('#btn-check-all').addEventListener('click', async () => {
   }
 });
 
-/* ---------- 新增密钥弹窗 ---------- */
+/* ---------- 密钥弹窗（新增 / 可视化编辑） ---------- */
 
-function openModal() {
+function openModal(mode = 'add', keyRecord = null) {
+  state.editingKey = mode === 'edit' ? keyRecord : null;
+  const isEdit = mode === 'edit' && keyRecord;
+
+  $('#modal-title').textContent = isEdit ? ('编辑密钥「' + keyRecord.label + '」') : '新增密钥';
   const sel = $('#f-provider');
-  sel.innerHTML = state.providers.map((p) => '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join('');
-  $('#f-label').value = '';
+  sel.innerHTML = state.providers.map((p) =>
+    '<option value="' + esc(p.id) + '"' + (isEdit && p.id === keyRecord.providerID ? ' selected' : '') + '>' +
+    esc(p.name) + '</option>').join('');
+  sel.disabled = !!isEdit;
+
+  $('#f-label').value = isEdit ? keyRecord.label : '';
+  $('#f-base-url').value = isEdit ? (keyRecord.baseURL || '') : '';
   $('#f-secret').value = '';
-  $('#f-priority').value = '100';
-  $('#f-tags').value = '';
-  $('#f-note').value = '';
+  $('#f-secret').type = 'password';
+  $('#f-secret').placeholder = isEdit ? '留空表示保持原密钥明文不变；输入新 Key 则覆盖更新' : '粘贴 API Key（仅保存在本机密钥后端）';
+  $('#f-secret-hint').textContent = isEdit ? ('当前掩码：' + keyRecord.hint + ' · 短指纹 ' + keyRecord.fingerprint) : '';
+  $('#f-priority').value = isEdit ? String(keyRecord.priority) : '100';
+  $('#f-tags').value = isEdit ? (keyRecord.tags || []).join(', ') : '';
+  $('#f-note').value = isEdit ? (keyRecord.note || '') : '';
   $('#f-warnings').classList.add('hidden');
+
   renderProviderInfo();
   $('#modal-mask').classList.remove('hidden');
   $('#f-label').focus();
 }
 
-function closeModal() { $('#modal-mask').classList.add('hidden'); }
+function closeModal() {
+  state.editingKey = null;
+  $('#modal-mask').classList.add('hidden');
+}
+
+// 辅助输入框粘贴事件兜底（双重保证无论何时都能粘贴文本）
+['#f-base-url', '#f-secret', '#f-label'].forEach((sel) => {
+  const el = $(sel);
+  if (!el) return;
+  el.addEventListener('paste', (e) => {
+    // 允许浏览器原生粘贴流转，若被特殊环境限制则主动读取 clipboardData 填入
+    if (e.clipboardData && e.clipboardData.getData) {
+      const text = e.clipboardData.getData('text');
+      if (text && el.value === '') {
+        // 如果系统没有自动插入，则稍后检测补足
+        setTimeout(() => {
+          if (!el.value) {
+            el.value = text;
+            renderProviderInfo();
+          }
+        }, 10);
+      }
+    }
+  });
+});
+
+$('#f-secret-toggle').addEventListener('click', () => {
+  const inp = $('#f-secret');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+});
 
 function clientWarnings(secret, provider) {
   const out = [];
@@ -299,10 +399,10 @@ function clientWarnings(secret, provider) {
   if (secret !== secret.trim()) out.push('密钥首尾含空白字符，保存时会自动去除');
   if (/\s/.test(secret.trim())) out.push('密钥中间含空格或换行，疑似复制错误');
   const t = secret.trim();
-  if (t.length < 16) out.push('密钥长度短于 16 字符，多数厂商密钥不会这么短');
+  if (t.length < 12) out.push('密钥长度短于 12 字符，多数厂商密钥不会这么短');
   const prefixes = (provider && provider.secretPrefixes) || [];
   if (prefixes.length && !prefixes.some((p) => t.startsWith(p))) {
-    out.push('该厂商密钥通常以 ' + prefixes.join(' / ') + ' 开头，请复核是否贴错');
+    out.push('该厂商通常以 ' + prefixes.join(' / ') + ' 开头；若为中间商中转凭证可直接保存');
   }
   return out;
 }
@@ -318,6 +418,12 @@ function renderProviderInfo() {
   }
   html += '<div class="note">' + esc(p.note) + '</div>';
   $('#f-provider-info').innerHTML = html;
+
+  const baseInput = $('#f-base-url');
+  if (baseInput) {
+    baseInput.placeholder = p.baseURL ? ('官方默认: ' + p.baseURL) : '留空使用官方默认；中转/中间商请填代理端点';
+    $('#f-base-url-hint').textContent = p.baseURL ? ('官方端点为 ' + p.baseURL + '，若使用中间商/转发代理请在此覆盖') : '';
+  }
 
   const warn = clientWarnings($('#f-secret').value, p);
   const box = $('#f-warnings');
@@ -337,29 +443,59 @@ $('#f-provider-info').addEventListener('click', (e) => {
   if (btn) call('openURL', { url: btn.dataset.open }).catch(() => {});
 });
 
-$('#btn-add-key').addEventListener('click', openModal);
+$('#btn-add-key').addEventListener('click', () => openModal('add'));
 $('#modal-close').addEventListener('click', closeModal);
 $('#modal-cancel').addEventListener('click', closeModal);
 $('#modal-mask').addEventListener('click', (e) => { if (e.target.id === 'modal-mask') closeModal(); });
 
 $('#modal-save').addEventListener('click', async () => {
-  const payload = {
-    providerID: $('#f-provider').value,
-    label: $('#f-label').value.trim(),
-    secret: $('#f-secret').value,
-    priority: parseInt($('#f-priority').value, 10) || 100,
-    tags: $('#f-tags').value.split(',').map((s) => s.trim()).filter(Boolean),
-    note: $('#f-note').value.trim()
-  };
-  if (!payload.secret.trim()) { banner('warning', '请先粘贴密钥明文'); return; }
-  if (!payload.label) payload.label = providerName(payload.providerID) + ' 密钥';
+  const isEdit = !!state.editingKey;
+  const secretVal = $('#f-secret').value;
+  const labelVal = $('#f-label').value.trim();
+  const baseURLVal = $('#f-base-url').value.trim();
+
+  if (!isEdit && !secretVal.trim()) {
+    banner('warning', '请先粘贴密钥明文');
+    return;
+  }
+
   try {
-    const res = await call('addKey', payload);
-    closeModal();
-    const w = res.warnings || [];
-    banner(w.length ? 'warning' : 'success',
-      '已保存密钥「' + res.record.label + '」（掩码 ' + res.record.hint + '）' +
-      (w.length ? '；注意：' + w.join('；') : ''));
+    if (isEdit) {
+      const payload = {
+        id: state.editingKey.id,
+        label: labelVal || state.editingKey.label,
+        baseURL: baseURLVal,
+        priority: parseInt($('#f-priority').value, 10) || 100,
+        tags: $('#f-tags').value.split(',').map((s) => s.trim()).filter(Boolean),
+        note: $('#f-note').value.trim()
+      };
+      if (secretVal.trim()) {
+        payload.secret = secretVal.trim();
+      }
+      const res = await call('updateKey', payload);
+      closeModal();
+      const w = res.warnings || [];
+      banner(w.length ? 'warning' : 'success',
+        '已更新密钥「' + res.record.label + '」' +
+        (payload.secret ? '（新掩码 ' + res.record.hint + '）' : '') +
+        (w.length ? '；注意：' + w.join('；') : ''));
+    } else {
+      const payload = {
+        providerID: $('#f-provider').value,
+        label: labelVal || (providerName($('#f-provider').value) + ' 密钥'),
+        baseURL: baseURLVal || undefined,
+        secret: secretVal,
+        priority: parseInt($('#f-priority').value, 10) || 100,
+        tags: $('#f-tags').value.split(',').map((s) => s.trim()).filter(Boolean),
+        note: $('#f-note').value.trim()
+      };
+      const res = await call('addKey', payload);
+      closeModal();
+      const w = res.warnings || [];
+      banner(w.length ? 'warning' : 'success',
+        '已保存密钥「' + res.record.label + '」（掩码 ' + res.record.hint + '）' +
+        (w.length ? '；注意：' + w.join('；') : ''));
+    }
     await loadKeys();
     await loadAudit();
   } catch (err) {
@@ -370,7 +506,7 @@ $('#modal-save').addEventListener('click', async () => {
 /* ---------- 注入中心 ---------- */
 
 function injectForm() {
-  const target = targetById($('#i-target') ? $('#i-target').value : '');
+  const target = targetById(state.selectedTargetID) || state.targets[0];
   return {
     targetID: target ? target.id : '',
     keyID: $('#i-key') ? $('#i-key').value : '',
@@ -383,86 +519,334 @@ function injectForm() {
 }
 
 function renderInjectPicker() {
-  const prevTarget = state.lastInjectForm ? state.lastInjectForm.targetID : (state.targets[0] || {}).id;
-  const target = targetById(prevTarget) || state.targets[0];
-  if (!target) { $('#inject-picker').innerHTML = '<div class="empty">没有可用的注入落点</div>'; return; }
+  if (!state.targets.length) {
+    $('#inject-picker').innerHTML = '<div class="empty">没有可用的注入落点</div>';
+    return;
+  }
 
+  // 默认选中目标
+  if (!state.selectedTargetID || !targetById(state.selectedTargetID)) {
+    const prevTarget = state.lastInjectForm ? state.lastInjectForm.targetID : '';
+    state.selectedTargetID = prevTarget && targetById(prevTarget) ? prevTarget : state.targets[0].id;
+  }
+  const target = targetById(state.selectedTargetID) || state.targets[0];
+  const filter = state.targetFilter || 'all';
+
+  // 过滤落点
+  const filteredTargets = state.targets.filter((t) => {
+    if (filter === 'all') return true;
+    return getTargetCategory(t) === filter;
+  });
+
+  // 密钥匹配：放宽规则，如果没有精准匹配，则接纳自定义通用网关 key 或任意可用 key
   const prevKey = state.lastInjectForm ? state.lastInjectForm.keyID : '';
-  const candidates = state.keys.filter((k) => !target.providerID || k.providerID === target.providerID);
+  let candidates = state.keys.filter((k) => !target.providerID || k.providerID === target.providerID);
+  if (!candidates.length) {
+    // 自动兼容自定义/网关类型的 key
+    candidates = state.keys.filter((k) => k.providerID === 'custom' || !k.providerID);
+  }
+  if (!candidates.length) {
+    candidates = state.keys;
+  }
+  const selectedKey = candidates.find((k) => k.id === prevKey) || candidates[0];
 
-  let html = '<h2>第一步：选择注入落点与密钥</h2>';
-  html += '<div class="grid-2">';
+  // 更新顶部一键注入栏说明
+  const descEl = $('#one-click-desc');
+  if (descEl) {
+    descEl.textContent = '当前目标：' + target.name + ' · 将自动使用「' + (selectedKey ? selectedKey.label : '未匹配') + '」一键完成写入与备份';
+  }
 
-  html += '<label class="field"><span>注入落点</span><select id="i-target">' +
-    state.targets.map((t) =>
-      '<option value="' + esc(t.id) + '"' + (t.id === target.id ? ' selected' : '') + '>' +
-      esc(t.name) + ' · ' + esc(t.formatLabel) + (t.requiresPath ? '（需填路径）' : '') + '</option>').join('') +
-    '</select></label>';
+  let html = '<h2>选择注入目标（仅保留核心宿主）</h2>';
+  
+  // 简化的扩展按钮栏
+  html += '<div class="target-categories" style="margin-bottom:12px;">' +
+    '<span class="dim small">已为你净化无用落点，当前专注 DSH 与 Codex</span>' +
+    '<button class="btn small" id="btn-quick-add-target">＋ 扩展新落点</button>' +
+  '</div>';
+
+  // 落点卡片选择矩阵
+  html += '<div class="target-grid">';
+  state.targets.forEach((t) => {
+    const isSel = t.id === target.id;
+    const icon = getTargetIcon(t);
+    const fmtCls = (t.format || 'none').toLowerCase();
+    html +=
+      '<div class="target-card ' + (isSel ? 'selected' : '') + '" data-target-id="' + esc(t.id) + '">' +
+        '<div class="target-card-head">' +
+          '<div class="target-badge-wrap">' +
+            '<span class="target-icon">' + icon + '</span>' +
+            '<span class="target-card-name">' + esc(t.name) + '</span>' +
+          '</div>' +
+          '<span class="format-badge ' + fmtCls + '">' + esc(t.formatLabel) + '</span>' +
+        '</div>' +
+        '<div class="target-card-path">' + (t.filePath ? esc(t.filePath) : '<span class="dim">需填路径 / 仅生成片段</span>') + '</div>' +
+        '<div class="target-card-foot">' +
+          '<span class="dim">' + (t.providerID ? esc(providerName(t.providerID)) : '通用 / 兼容网关') + '</span>' +
+          (t.isCustom ? '<button class="icon-btn" data-act="del-target" data-target-id="' + esc(t.id) + '" title="删除自定义落点">🗑</button>' : '') +
+        '</div>' +
+      '</div>';
+  });
+  html += '</div>';
+
+  // 高级微调折叠抽屉（默认收起，极简呈现）
+  html += '<details style="margin-top:16px;border:1px solid var(--line);border-radius:9px;padding:10px 14px;background:var(--panel);">' +
+    '<summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-dim);user-select:none;">' +
+    '⚙️ 展开高级微调与手动核对（可选）' +
+    '</summary>';
+
+  html += '<div class="grid-2" style="margin-top:12px;">';
 
   html += '<label class="field"><span>使用密钥</span><select id="i-key">' +
     (candidates.length
       ? candidates.map((k) =>
-          '<option value="' + esc(k.id) + '"' + (k.id === prevKey ? ' selected' : '') + '>' +
+          '<option value="' + esc(k.id) + '"' + (selectedKey && k.id === selectedKey.id ? ' selected' : '') + '>' +
           esc(k.label) + ' · ' + esc(providerName(k.providerID)) + ' · ' + esc(k.hint) +
           (k.enabled ? '' : '（已禁用）') + '</option>').join('')
-      : '<option value="">（该落点没有匹配的密钥）</option>') +
+      : '<option value="">（该落点暂无匹配密钥，请先在密钥库录入）</option>') +
     '</select></label>';
-
-  html += '</div>';
-  html += '<div class="warn-box" style="background:var(--panel-2);color:var(--text-dim)">' + esc(target.note) + '</div>';
 
   const showPath = target.writesFile;
   const showJson = target.format === 'json' || target.format === 'plist';
   const showSection = target.format === 'yaml' || target.format === 'toml';
 
-  html += '<div class="grid-3">';
   if (showPath) {
-    html += '<label class="field"><span>目标文件路径</span><input type="text" id="i-path" value="' +
+    html += '<label class="field"><span>目标文件绝对路径</span><input type="text" id="i-path" value="' +
       esc(state.lastInjectForm ? state.lastInjectForm.overridePath : target.filePath) +
       '" placeholder="' + (target.filePath ? esc(target.filePath) : '必填，例如 ~/.zshrc') + '"></label>';
+  } else {
+    html += '<div></div>';
   }
-  if (showJson) {
-    html += '<label class="field"><span>键路径（点号分隔）</span><input type="text" id="i-jsonpath" value="' +
-      esc(state.lastInjectForm ? state.lastInjectForm.jsonPath : target.jsonPath) +
-      '" placeholder="例如 env.OPENAI_API_KEY"></label>';
-  }
-  if (showSection) {
-    html += '<label class="field"><span>区块名（可留空）</span><input type="text" id="i-section" value="' +
-      esc(state.lastInjectForm ? state.lastInjectForm.section : target.section) +
-      '" placeholder="例如 openai"></label>';
-  }
-  html += '<label class="field"><span>键名（可留空取默认）</span><input type="text" id="i-itemkey" value="' +
-    esc(state.lastInjectForm ? state.lastInjectForm.itemKey : (target.itemKey || '')) +
-    '" placeholder="' + esc(target.itemKey || '按厂商默认环境变量名') + '"></label>';
   html += '</div>';
 
-  html += '<div style="display:flex;gap:8px;margin-top:4px">' +
-    '<button class="btn primary" id="btn-plan">生成注入计划（dry-run）</button>' +
+  if (showJson || showSection || target.writesFile) {
+    html += '<div class="grid-2">';
+    if (showJson) {
+      html += '<label class="field"><span>JSON 键路径（点号分隔）</span><input type="text" id="i-jsonpath" value="' +
+        esc(state.lastInjectForm ? state.lastInjectForm.jsonPath : target.jsonPath) +
+        '" placeholder="例如 env.OPENAI_API_KEY"></label>';
+    }
+    if (showSection) {
+      html += '<label class="field"><span>YAML / TOML 区块名（可留空）</span><input type="text" id="i-section" value="' +
+        esc(state.lastInjectForm ? state.lastInjectForm.section : target.section) +
+        '" placeholder="例如 refs 或 openai"></label>';
+    }
+    html += '<label class="field"><span>写入键名（可留空取默认）</span><input type="text" id="i-itemkey" value="' +
+      esc(state.lastInjectForm ? state.lastInjectForm.itemKey : (target.itemKey || '')) +
+      '" placeholder="' + esc(target.itemKey || '按厂商默认环境变量名') + '"></label>';
+    html += '</div>';
+  }
+
+  html += '<div class="warn-box" style="background:var(--panel-2);color:var(--text-dim);margin:10px 0;">' +
+    '📌 <b>落点安全说明：</b>' + esc(target.note) + '</div>';
+
+  html += '<div style="display:flex;gap:10px;margin-top:12px">' +
+    '<button class="btn primary" id="btn-plan">生成注入计划（Dry-Run 差异比对）</button>' +
     '<button class="btn" id="btn-rollback-latest">回滚该落点最近一次注入</button>' +
-    '</div>';
+    '</div></details>';
 
   $('#inject-picker').innerHTML = html;
 
-  $('#i-target').addEventListener('change', () => {
-    state.lastInjectForm = null;
-    state.plan = null;
-    renderInjectPicker();
-    renderPlan();
-  });
+  // 绑定一键注入大按钮
+  const oneClickBtn = $('#btn-one-click-apply');
+  if (oneClickBtn) {
+    oneClickBtn.onclick = async () => {
+      await doOneClickInject(target, selectedKey);
+    };
+  }
+
+  // 绑定事件
+  const targetTabs = $('#target-tabs');
+  if (targetTabs) {
+    targetTabs.addEventListener('click', (e) => {
+      const tab = e.target.closest('.tab');
+      if (!tab) return;
+      state.targetFilter = tab.dataset.tfilter;
+      renderInjectPicker();
+    });
+  }
+
+  const quickAdd = $('#btn-quick-add-target');
+  if (quickAdd) quickAdd.addEventListener('click', openTargetModal);
+
+  const pickerEl = $('#inject-picker');
+  if (pickerEl) {
+    pickerEl.onclick = async (e) => {
+      const delBtn = e.target.closest('[data-act="del-target"]');
+      if (delBtn) {
+        e.stopPropagation();
+        const tid = delBtn.dataset.targetId;
+        const t = targetById(tid);
+        if (!confirm('确认删除自定义落点「' + (t ? t.name : tid) + '」？')) return;
+        try {
+          await call('deleteTarget', { id: tid });
+          state.targets = await call('targets');
+          if (state.selectedTargetID === tid) state.selectedTargetID = (state.targets[0] || {}).id;
+          banner('success', '已删除落点');
+          renderInjectPicker();
+        } catch (err) {
+          banner('error', '删除失败: ' + err.message);
+        }
+        return;
+      }
+
+      const card = e.target.closest('.target-card');
+      if (card) {
+        const tid = card.dataset.targetId;
+        if (tid && tid !== state.selectedTargetID) {
+          state.selectedTargetID = tid;
+          state.lastInjectForm = null;
+          state.plan = null;
+          state.outcome = null;
+          renderInjectPicker();
+          renderPlan();
+        }
+      }
+    };
+  }
+
   $('#btn-plan').addEventListener('click', doPlan);
   $('#btn-rollback-latest').addEventListener('click', doRollbackLatest);
+}
+
+/* ---------- 扩展落点弹窗 ---------- */
+
+function openTargetModal() {
+  const sel = $('#tf-provider');
+  sel.innerHTML = '<option value="">通用（支持任意厂商）</option>' +
+    state.providers.map((p) => '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join('');
+  $('#tf-name').value = '';
+  $('#tf-format').value = 'json';
+  $('#tf-path').value = '';
+  $('#tf-jsonpath').value = '';
+  $('#tf-section').value = '';
+  $('#tf-itemkey').value = '';
+  $('#tf-note').value = '';
+  updateTargetFormFields();
+  $('#modal-target-mask').classList.remove('hidden');
+  $('#tf-name').focus();
+}
+
+function closeTargetModal() {
+  $('#modal-target-mask').classList.add('hidden');
+}
+
+function updateTargetFormFields() {
+  const fmt = $('#tf-format').value;
+  $('#tf-path-wrap').classList.toggle('hidden', fmt === 'none');
+  $('#tf-jsonpath-wrap').classList.toggle('hidden', fmt !== 'json' && fmt !== 'plist');
+  $('#tf-section-wrap').classList.toggle('hidden', fmt !== 'yaml' && fmt !== 'toml');
+  $('#tf-itemkey-wrap').classList.toggle('hidden', fmt === 'none');
+}
+
+$('#tf-format').addEventListener('change', updateTargetFormFields);
+$('#btn-add-target').addEventListener('click', openTargetModal);
+$('#modal-target-close').addEventListener('click', closeTargetModal);
+$('#modal-target-cancel').addEventListener('click', closeTargetModal);
+$('#modal-target-mask').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-target-mask') closeTargetModal();
+});
+
+$('#modal-target-save').addEventListener('click', async () => {
+  const name = $('#tf-name').value.trim();
+  const format = $('#tf-format').value;
+  const filePath = $('#tf-path').value.trim();
+  if (!name) { banner('warning', '请填写落点名称'); return; }
+  if (format !== 'none' && !filePath) { banner('warning', '请填写目标文件路径'); return; }
+
+  const payload = {
+    name: name,
+    providerID: $('#tf-provider').value,
+    format: format,
+    filePath: filePath,
+    jsonPath: $('#tf-jsonpath').value.trim(),
+    section: $('#tf-section').value.trim(),
+    itemKey: $('#tf-itemkey').value.trim(),
+    note: $('#tf-note').value.trim()
+  };
+  try {
+    const newTarget = await call('saveTarget', payload);
+    closeTargetModal();
+    banner('success', '已成功扩展注入落点「' + newTarget.name + '」');
+    state.targets = await call('targets');
+    state.selectedTargetID = newTarget.id;
+    state.lastInjectForm = null;
+    state.plan = null;
+    state.outcome = null;
+    renderInjectPicker();
+    renderPlan();
+  } catch (err) {
+    banner('error', '保存落点失败: ' + (err.message || err));
+  }
+});
+
+/* ---------- 一键极简注入全流程 ---------- */
+
+async function doOneClickInject(target, selectedKey) {
+  if (!target) {
+    banner('warning', '请先选择要注入的目标应用');
+    return;
+  }
+  if (!selectedKey) {
+    banner('warning', '当前目标应用暂无匹配的密钥，请先在「密钥库」添加对应密钥');
+    return;
+  }
+
+  const btn = $('#btn-one-click-apply');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ 正在全自动写入…';
+  }
+
+  const form = {
+    targetID: target.id,
+    keyID: selectedKey.id,
+    overridePath: target.filePath || '',
+    jsonPath: target.jsonPath || '',
+    section: target.section || '',
+    itemKey: target.itemKey || '',
+    reveal: state.reveal
+  };
+
+  try {
+    // 1. 生成并校验计划 (Dry-run)
+    const plan = await call('plan', form);
+    if (plan.blocked) {
+      banner('error', '安全阻断：' + plan.blockedReason);
+      if (btn) { btn.disabled = false; btn.textContent = '⚡ 一键注入生效'; }
+      return;
+    }
+
+    // 2. 确认写入与原子备份
+    const res = await call('apply', form);
+    state.outcome = res;
+    state.plan = null;
+    renderPlan();
+    banner(res.success ? 'success' : 'error',
+      (res.success ? '🎉 一键注入成功！' : '❌ 写入失败：') + res.message +
+      (res.backupPath ? '（已自动备份原文件）' : ''));
+    await loadKeys();
+    await loadAudit();
+  } catch (err) {
+    banner('error', '一键注入异常：' + (err.message || err));
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⚡ 一键注入生效';
+    }
+  }
 }
 
 async function doPlan() {
   const form = injectForm();
   if (!form.targetID) { banner('warning', '请先选择注入落点'); return; }
-  if (!form.keyID) { banner('warning', '该落点没有可用的密钥，请先到「密钥库」新增'); return; }
+  if (!form.keyID) { banner('warning', '该落点没有可用的密钥，请先在密钥库新增或选择有效密钥'); return; }
   state.lastInjectForm = form;
   try {
     const plan = await call('plan', form);
     state.plan = plan;
     state.outcome = null;
     renderPlan();
+    updateStepper(3);
     if (plan.blocked) banner('error', '已按安全策略阻断：' + plan.blockedReason);
     else if (!plan.writesFile) banner('info', '该落点不写入任何文件，仅生成导出片段');
     else banner('info', '已生成注入计划，请核对差异后决定是否写入');
@@ -480,7 +864,7 @@ function renderPlan() {
     return;
   }
   const p = state.plan;
-  let html = '<div class="card"><h2>第二步：核对差异<span class="hint">' +
+  let html = '<div class="card"><h2>第三步：核对差异 (Dry-Run)<span class="hint">' +
     (p.writesFile ? '写入前会自动备份原文件' : '该落点不写文件') + '</span></h2>';
 
   html += '<div class="kv"><span class="k">落点</span><span class="v">' + esc(p.targetName) + '（' + esc(p.formatLabel) + '）</span></div>';
@@ -504,7 +888,7 @@ function renderPlan() {
     html += '<div style="margin-top:10px"><div class="small dim" style="margin-bottom:4px">导出片段（自行粘贴到环境）</div>' +
       '<div class="snippet">' + esc(p.snippet) + '</div></div>';
   } else if (p.diff && p.diff.length) {
-    html += '<div style="margin-top:10px"><div class="small dim" style="margin-bottom:4px">差异预览</div><div class="diff">';
+    html += '<div style="margin-top:10px"><div class="small dim" style="margin-bottom:4px">差异预览（Dry-Run）</div><div class="diff">';
     p.diff.forEach((line) => {
       const cls = line.kind === '+' ? 'added' : (line.kind === '-' ? 'removed' : 'context');
       html += '<div class="diff-line ' + cls + '"><span class="sign">' + esc(line.kind) + '</span><span>' +
@@ -515,7 +899,7 @@ function renderPlan() {
 
   html += '<div style="display:flex;gap:8px;margin-top:12px">';
   if (!p.blocked && p.writesFile) {
-    html += '<button class="btn primary" id="btn-apply">确认写入（自动备份）</button>';
+    html += '<button class="btn primary" id="btn-apply">确认原子写入（自动备份）</button>';
   }
   html += '<button class="btn" id="btn-discard">放弃本次计划</button>';
   if (state.reveal) html += '<span class="small" style="color:var(--orange);align-self:center">⚠️ 正在显示明文</span>';
@@ -526,11 +910,15 @@ function renderPlan() {
 
   const apply = $('#btn-apply');
   if (apply) apply.addEventListener('click', doApply);
-  $('#btn-discard').addEventListener('click', () => { state.plan = null; renderPlan(); });
+  $('#btn-discard').addEventListener('click', () => {
+    state.plan = null;
+    renderPlan();
+    updateStepper(2);
+  });
 }
 
 function outcomeCard(o) {
-  let html = '<div class="card"><h2>第三步：执行结果</h2>';
+  let html = '<div class="card"><h2>第四步：执行结果</h2>';
   html += '<div class="kv"><span class="k">结果</span><span class="v">' +
     (o.success ? '✅ ' : '❌ ') + esc(o.message) + '</span></div>';
   if (o.filePath) html += '<div class="kv"><span class="k">目标文件</span><span class="v mono">' + esc(o.filePath) + '</span></div>';
@@ -548,6 +936,7 @@ async function doApply() {
     state.outcome = res;
     state.plan = null;
     renderPlan();
+    updateStepper(4);
     banner(res.success ? 'success' : 'error', res.message + (res.backupPath ? '（备份：' + res.backupPath + '）' : ''));
     await loadKeys();
     await loadAudit();

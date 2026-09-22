@@ -1,7 +1,7 @@
 ---
 name: keyinject
 description: AI API Key 管理与配置注入技能包。当用户在 DSH 会话中需要新增/查看/删除大模型 API Key、把密钥注入到 Claude Code / Codex CLI / Shell 启动脚本 / 项目 .env 等第三方工具配置文件、探测密钥是否有效或额度是否耗尽、回滚一次注入、查看操作审计时使用本技能。
-version: 1.0.0
+version: 1.2.0
 ---
 
 # keyinject — AI API Key 管理与配置注入技能
@@ -91,6 +91,20 @@ keyinject rollback --audit-id <审计id> --json                        # 精确�
 keyinject audit --limit 20 --json
 ```
 
+### 4.7 Codex 网关模型路由体检（v1.2.0 起）
+
+Codex 桌面端切换公司网关模型后，`~/.codex/config.toml` 可能只剩 `model` 而缺 `model_provider`，
+请求会退回官方 `openai` provider，被 ChatGPT 后端拒绝为
+`The '<model>' model is not supported when using Codex with a ChatGPT account.`
+
+```bash
+keyinject gateway check --json            # 体检：路由是否指向 codex_gateway
+keyinject gateway repair                  # dry-run 预览修复内容
+keyinject gateway repair --yes            # 落盘修复（自动备份 + 写审计）
+```
+
+修复只搬动 `model` 与 `model_provider` 两个键，其余顶层设置原样保留；用户显式指定的第三方 provider 不会被覆盖。
+
 ## 五、落点选择建议
 
 | 场景 | 推荐落点 | 说明 |
@@ -112,6 +126,8 @@ keyinject audit --limit 20 --json
 | 提示文件不可写 | 权限或路径是目录 | 让用户确认路径与权限，不要用 sudo 绕过 |
 | 探测返回 `unknown` | 厂商端点路径变化或网络受限 | 如实告知「未知」，而非判定失效；可在 `config/providers.json` 中覆盖端点 |
 | YAML/TOML 落点报格式不支持 | 目标文件用了多层嵌套或内联写法 | 建议改用 JSON 落点，或由用户手工维护该文件 |
+| Codex 报 `model is not supported when using Codex with a ChatGPT account` | 网关模型的请求被路由到官方 `openai` provider | `keyinject gateway check` 确认后执行 `keyinject gateway repair --yes`，再完全重启 Codex |
+| Codex 报 `429 / 503 auth_unavailable`（含 `RESOURCE_EXHAUSTED`） | 网关上游额度耗尽或凭据抖动，**与本地配置无关** | 如实告知属于网关侧问题：改用另一条线路（如 DeepSeek）或联系网关管理员 |
 
 ## 七、能力边界（不要向用户夸大）
 

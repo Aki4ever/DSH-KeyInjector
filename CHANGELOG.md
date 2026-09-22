@@ -6,6 +6,43 @@
 
 ---
 
+## [1.2.0] — 2026-09-22
+
+### 修复
+- **Codex 桌面端切换公司网关模型后报 “model is not supported when using Codex with a ChatGPT account”**：
+  - **根因**：桌面端顶部模型菜单把 `model` 改成 `ark/DeepSeek-V4.1-Flash` 或 `gemini-3.8-flash-high` 时，
+    不会同步写 `model_provider`，`~/.codex/config.toml` 因此退回官方 `openai` provider，
+    请求被发往 ChatGPT 后端，自定义模型名必然被拒（HTTP 400）。
+  - **修复**：`InjectionEngine` 新增 provider 路由守护 `ensureCodexGatewayProviderRouting(_:catalogPath:)`，
+    当 `model` 属公司网关模型而 `model_provider` 缺失或为 `openai` 时，自动补写受管区块
+    `# BEGIN/END CODEX-GATEWAY DESKTOP`，把路由锁回 `codex_gateway`；只搬动 `model` 与
+    `model_provider` 两个键，顶层其它设置（推理档位、沙箱、通知等）原样保留；
+    用户显式指定的其它第三方 provider 不会被覆盖。
+  - 注入落点命中 `~/.codex/config.toml` 时会自动执行该守护，杜绝再次静默失效。
+
+### 新增
+- **`keyinject gateway check|repair [--yes]`**：Codex 网关路由体检与一键修复（默认 dry-run，落盘前自动备份并写审计）。
+- **回归测试 6 项**（`Codex 网关 provider 路由守护` 套件）：官方模型不动、缺 provider 补写、
+  幂等、受管区块被改回 `openai` 时收敛、尊重第三方 provider、目录标记词识别。测试总数 40 → 46。
+
+### 变更
+- `model_reasoning_effort` 等顶层键不再受路由修复影响（修复只重排 `model` / `model_provider`）。
+
+---
+
+## [1.1.0] — 2026-09-22
+
+### 新增
+- **Codex 桌面端模型菜单无缝打通**：
+  - 自动扩展生成 `~/.codex/codex-gateway-models.json`，将公司中间商网关所提供的 DeepSeek V4.1、Gemini 3.8 Flash 模型直接注册到 Codex 顶部下拉菜单中。
+  - 保证 Codex 桌面端官方 ChatGPT OAuth 登录态与第三方网关模型完全兼容共存，绝不触发登录白屏报错。
+- **本地高强度 AES-GCM 安全存储**：
+  - 默认敏感数据存储切换为基于硬件随机主密钥的 AES-GCM 本地加密引擎，彻底杜绝 macOS 系统的钥匙串授权密码弹窗骚扰，实现全流程 0 弹窗无感操作。
+- **极简「⚡ 一键注入生效」流转**：
+  - 移除繁琐的多步操作，顶部直观大按钮一键完成自动择优匹配、Dry-run 校验、自动备份、原子写入与读回校验。
+- **落点净化**：
+  - 彻底清洗 8 个冗余干扰落点，精简为专为 DSH 桌面端与 Codex 打造的双宿主矩阵。
+
 ## [1.0.0] — 2026-09-22
 
 首个可交付版本。对应 DSH 任务 `[D001][78分] 密钥注入器立项`。

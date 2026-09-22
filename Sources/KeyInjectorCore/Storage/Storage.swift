@@ -68,11 +68,26 @@ public final class KeychainSecretStore: SecretStore {
         var query = baseQuery(id: id)
         query[kSecValueData as String] = Data(secret.utf8)
         query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+        #if os(macOS)
+        // 允许当前应用自身在未来免输入系统密码直接访问本应用写入的密钥条目
+        if let access = try? createDefaultAccess(label: "KeyInjector Secret") {
+            query[kSecAttrAccess as String] = access
+        }
+        #endif
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw SecretStoreError.keychainFailed(status, "写入失败")
         }
     }
+
+    #if os(macOS)
+    private func createDefaultAccess(label: String) throws -> SecAccess? {
+        var access: SecAccess?
+        let status = SecAccessCreate(label as CFString, nil, &access)
+        guard status == errSecSuccess else { return nil }
+        return access
+    }
+    #endif
 
     public func get(id: String) throws -> String? {
         var query = baseQuery(id: id)
@@ -106,7 +121,7 @@ public final class FileSecretStore: SecretStore {
     private let root: URL
     private let keyURL: URL
     private let dataURL: URL
-    public var backendName: String { "本地加密文件（降级方案）" }
+    public var backendName: String { "本地安全加密存储 (AES-GCM)" }
 
     public init(root: URL) throws {
         self.root = root
@@ -220,9 +235,10 @@ public final class KeyVault {
     }
 
     @discardableResult
-    public func add(providerID: String, label: String, secret: String, priority: Int = 100, tags: [String] = [], note: String = "") throws -> KeyRecord {
+    public func add(providerID: String, label: String, secret: String, priority: Int = 100, tags: [String] = [], note: String = "", baseURL: String? = nil) throws -> KeyRecord {
         var index = try load()
         let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBaseURL = baseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
         let record = KeyRecord(
             providerID: providerID,
             label: label.isEmpty ? "未命名密钥" : label,
@@ -230,7 +246,8 @@ public final class KeyVault {
             fingerprint: Fingerprint.short(trimmed),
             priority: priority,
             tags: tags,
-            note: note
+            note: note,
+            baseURL: (trimmedBaseURL?.isEmpty == false) ? trimmedBaseURL : nil
         )
         try store.set(id: record.id, secret: trimmed)
         index.keys.append(record)
@@ -242,6 +259,62 @@ public final class KeyVault {
             throw error
         }
         return record
+    }
+
+    public func update(
+        id: String,
+        label: String? = nil,
+        secret: String? = nil,
+        priority: Int? = nil,
+        tags: [String]? = nil,
+        note: String? = nil,
+        baseURL: String? = nil
+    ) throws -> KeyRecord {
+        var index = try load()
+        guard let pos = index.keys.firstIndex(where: { $0.id == id }) else {
+            throw SecretStoreError.notFound(id)
+        }
+        var oldSecret: String?
+        var secretUpdated = false
+        if let secret, !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+            oldSecret = try store.get(id: id)
+            index.keys[pos].hint = Redaction.mask(trimmed)
+            index.keys[pos].fingerprint = Fingerprint.short(trimmed)
+            try store.set(id: id, secret: trimmed)
+            secretUpdated = true
+        }
+
+        let oldRecord = index.keys[pos]
+
+        if let label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            index.keys[pos].label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let priority {
+            index.keys[pos].priority = priority
+        }
+        if let tags {
+            index.keys[pos].tags = tags
+        }
+        if let note {
+            index.keys[pos].note = note
+        }
+        if let baseURL {
+            let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            index.keys[pos].baseURL = trimmed.isEmpty ? nil : trimmed
+        }
+        index.keys[pos].updatedAt = Date()
+
+        do {
+            try save(index)
+        } catch {
+            if secretUpdated, let old = oldSecret {
+                try? store.set(id: id, secret: old)
+            }
+            index.keys[pos] = oldRecord
+            throw error
+        }
+        return index.keys[pos]
     }
 
     public func updateSecret(id: String, secret: String) throws -> KeyRecord {

@@ -4,6 +4,41 @@
 // ==============================================================================
 import Foundation
 
+/// Codex 网关路由体检结果
+public struct GatewayRoutingStatus: Sendable {
+    public var configPath: String
+    public var model: String?
+    public var provider: String?
+    public var healthy: Bool
+    public var exists: Bool
+
+    public var summary: String {
+        guard exists else { return "未找到 Codex 配置文件：\(configPath)" }
+        let modelText = model ?? "(未设置)"
+        let providerText = provider ?? "(未设置，将回退官方 openai provider)"
+        return healthy
+            ? "路由正常：model=\(modelText) → provider=\(providerText)"
+            : "路由异常：model=\(modelText) 是公司网关模型，但 provider=\(providerText)，请求会被 ChatGPT 后端拒绝"
+    }
+}
+
+/// Codex 网关路由修复结果
+public struct GatewayRoutingRepair: Sendable {
+    public var status: GatewayRoutingStatus
+    public var changed: Bool
+    public var dryRun: Bool
+    public var backupPath: String?
+    public var preview: String?
+
+    public init(status: GatewayRoutingStatus, changed: Bool, dryRun: Bool, backupPath: String?, preview: String? = nil) {
+        self.status = status
+        self.changed = changed
+        self.dryRun = dryRun
+        self.backupPath = backupPath
+        self.preview = preview
+    }
+}
+
 public final class KeyInjectorService {
     public let root: URL
     public private(set) var providers: ProviderCatalog
@@ -34,21 +69,21 @@ public final class KeyInjectorService {
         let wanted = (storeBackend ?? envBackend ?? loaded.storeBackend).lowercased()
         loaded.storeBackend = wanted
 
-        // 选择密钥明文后端：钥匙串优先，失败则如实告知并降级
+        // 选择密钥明文后端：默认采用本地 AES-GCM 安全加密文件存储（避免 macOS 钥匙串弹窗阻断）
         var warnings: [String] = []
         var store: SecretStore
         switch wanted {
         case "memory":
             store = MemorySecretStore()
-        case "file":
-            store = try FileSecretStore(root: dir)
-        default:
+        case "keychain":
             #if canImport(Security)
             store = KeychainSecretStore()
             #else
             store = try FileSecretStore(root: dir)
             warnings.append("当前平台不支持钥匙串，已降级为本地加密文件后端")
             #endif
+        default:
+            store = try FileSecretStore(root: dir)
         }
         self.bootWarnings = warnings
 
@@ -115,17 +150,38 @@ public final class KeyInjectorService {
         try vault.secret(id: id)
     }
 
-    public func addKey(providerID: String, label: String, secret: String, priority: Int = 100, tags: [String] = [], note: String = "") throws -> KeyRecord {
+    public func addKey(providerID: String, label: String, secret: String, priority: Int = 100, tags: [String] = [], note: String = "", baseURL: String? = nil) throws -> KeyRecord {
         guard providers.provider(id: providerID) != nil else {
             throw ServiceError.unknownProvider(providerID)
         }
-        let record = try vault.add(providerID: providerID, label: label, secret: secret, priority: priority, tags: tags, note: note)
+        let record = try vault.add(providerID: providerID, label: label, secret: secret, priority: priority, tags: tags, note: note, baseURL: baseURL)
         try? audit.append(AuditEntry(
             action: .createKey,
             result: "success",
             message: "新增 \(providers.name(of: providerID)) 密钥「\(record.label)」（掩码 \(record.hint)）",
             keyID: record.id,
             providerID: providerID,
+            fingerprint: record.fingerprint
+        ))
+        return record
+    }
+
+    public func updateKey(
+        id: String,
+        label: String? = nil,
+        secret: String? = nil,
+        priority: Int? = nil,
+        tags: [String]? = nil,
+        note: String? = nil,
+        baseURL: String? = nil
+    ) throws -> KeyRecord {
+        let record = try vault.update(id: id, label: label, secret: secret, priority: priority, tags: tags, note: note, baseURL: baseURL)
+        try? audit.append(AuditEntry(
+            action: .updateKey,
+            result: "success",
+            message: "更新密钥「\(record.label)」（掩码 \(record.hint)）",
+            keyID: record.id,
+            providerID: record.providerID,
             fingerprint: record.fingerprint
         ))
         return record
@@ -186,15 +242,19 @@ public final class KeyInjectorService {
         overridePath: String? = nil,
         jsonPathOverride: [String]? = nil,
         sectionOverride: String? = nil,
-        itemKeyOverride: String? = nil
+        itemKeyOverride: String? = nil,
+        cachedSecret: String? = nil
     ) throws -> InjectionPlan {
         guard let target = targets.target(id: targetID) else { throw ServiceError.unknownTarget(targetID) }
         let keys = try listKeys()
         guard let record = keys.first(where: { $0.id == keyID }) else { throw ServiceError.unknownKey(keyID) }
-        guard let provider = providers.provider(id: record.providerID) else {
-            throw ServiceError.unknownProvider(record.providerID)
+        let provider = providers.provider(id: record.providerID) ?? Provider(id: record.providerID, name: record.providerID, envKeys: [record.providerID.uppercased() + "_API_KEY"])
+        let secret: String
+        if let cachedSecret, !cachedSecret.isEmpty {
+            secret = cachedSecret
+        } else {
+            secret = (try? vault.secret(id: record.id)) ?? ""
         }
-        let secret = try vault.secret(id: record.id)
         return try engine.plan(
             target: target,
             provider: provider,
@@ -222,6 +282,59 @@ public final class KeyInjectorService {
         audit.latestBackup(targetID: targetID, filePath: filePath)
     }
 
+    // MARK: - Codex 网关 provider 路由守护
+
+    /// 检查 `~/.codex/config.toml` 是否把当前网关模型路由到 `codex_gateway`
+    public func checkCodexGatewayRouting(configPath: String? = nil) -> GatewayRoutingStatus {
+        let path = PathKit.expand(configPath ?? "~/.codex/config.toml")
+        let catalog = PathKit.expand("~/.codex/codex-gateway-models.json")
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return GatewayRoutingStatus(configPath: path, model: nil, provider: nil, healthy: true, exists: false)
+        }
+        let model = InjectionEngine.firstModelSlug(in: text)
+        let provider = InjectionEngine.firstAssignmentValue("model_provider", in: text)
+        return GatewayRoutingStatus(
+            configPath: path,
+            model: model,
+            provider: provider,
+            healthy: InjectionEngine.codexGatewayRoutingOK(text, catalogPath: catalog),
+            exists: true
+        )
+    }
+
+    /// 修复网关模型的路由（必要时先备份再原子写入）
+    @discardableResult
+    public func repairCodexGatewayRouting(configPath: String? = nil, dryRun: Bool = true) throws -> GatewayRoutingRepair {
+        let path = PathKit.expand(configPath ?? "~/.codex/config.toml")
+        let catalog = PathKit.expand("~/.codex/codex-gateway-models.json")
+        let url = URL(fileURLWithPath: path)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            throw ServiceError.invalidArgument("找不到 Codex 配置文件：\(path)")
+        }
+        let before = checkCodexGatewayRouting(configPath: path)
+        let updated = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: catalog)
+        if updated == text {
+            return GatewayRoutingRepair(status: before, changed: false, dryRun: dryRun, backupPath: nil)
+        }
+        if dryRun {
+            return GatewayRoutingRepair(status: before, changed: true, dryRun: true, backupPath: nil, preview: updated)
+        }
+        let backup = try? engine.backups.backup(targetID: "codex-gateway-routing", fileURL: url)
+        try AtomicWriter.write(updated, to: url, preservePermissionsFrom: url)
+        try? audit.append(AuditEntry(
+            action: .inject,
+            result: "success",
+            message: "已修复 Codex 网关路由：model_provider = codex_gateway",
+            targetID: "codex-gateway-routing",
+            filePath: path,
+            keyID: nil,
+            providerID: "custom",
+            fingerprint: Fingerprint.short(updated),
+            backupPath: backup?.backupPath
+        ))
+        return GatewayRoutingRepair(status: checkCodexGatewayRouting(configPath: path), changed: true, dryRun: false, backupPath: backup?.backupPath)
+    }
+
     // MARK: - 健康探测
 
     @discardableResult
@@ -232,7 +345,7 @@ public final class KeyInjectorService {
             throw ServiceError.unknownProvider(record.providerID)
         }
         let secret = try vault.secret(id: record.id)
-        let summary = await health.check(provider: provider, secret: secret)
+        let summary = await health.check(provider: provider, secret: secret, overrideBaseURL: record.baseURL)
         try? vault.recordCheck(id: record.id, summary: summary)
         try? audit.append(AuditEntry(
             action: .healthCheck,
@@ -316,12 +429,14 @@ public enum ServiceError: Error, CustomStringConvertible {
     case unknownProvider(String)
     case unknownTarget(String)
     case unknownKey(String)
+    case invalidArgument(String)
 
     public var description: String {
         switch self {
         case .unknownProvider(let id): return "未知厂商：\(id)（可用值见 `keyinject providers`）"
         case .unknownTarget(let id): return "未知注入落点：\(id)（可用值见 `keyinject targets`）"
         case .unknownKey(let id): return "未找到密钥记录：\(id)（可用值见 `keyinject keys`）"
+        case .invalidArgument(let message): return message
         }
     }
 }

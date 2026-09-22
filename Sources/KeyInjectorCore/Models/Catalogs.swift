@@ -83,9 +83,9 @@ public struct ProviderCatalog: Sendable {
             baseURL: "https://generativelanguage.googleapis.com/v1beta",
             healthPath: "/models",
             consoleURL: "https://aistudio.google.com/app/apikey",
-            secretPrefixes: ["AIza"],
+            secretPrefixes: ["AIza", "AQ."],
             authStyle: .queryKey,
-            note: "Gemini 走 ?key= 查询参数鉴权，注意避免把含密钥的完整 URL 粘进聊天记录。"
+            note: "Gemini 走 ?key= 或 Bearer 鉴权，支持 Google AI Studio (AIza) 及 Cloud/中转凭证 (AQ.)。"
         ),
         Provider(
             id: "openrouter",
@@ -171,88 +171,24 @@ public struct TargetCatalog: Sendable {
 
     public static let builtins: [InjectionTarget] = [
         InjectionTarget(
-            id: "shell-profile",
-            name: "Shell 启动脚本（通用推荐）",
+            id: "dsh-desktop",
+            name: "DSH 桌面端凭据 (YAML)",
             providerID: nil,
-            format: .shellExport,
-            filePath: "~/.zshrc",
-            itemKey: nil,
-            note: "写入受管区块 `# >>> KeyInjector >>>`，幂等可重复执行。反例：fish / csh 用户无效，请改选自定义落点。"
-        ),
-        InjectionTarget(
-            id: "claude-code",
-            name: "Claude Code 设置",
-            providerID: "anthropic",
-            format: .json,
-            filePath: "~/.claude/settings.json",
-            jsonPath: ["env", "ANTHROPIC_API_KEY"],
-            note: "定点替换 `env.ANTHROPIC_API_KEY`，保留原文件缩进与键序。反例：若该文件不存在或没有 env 对象，本工具会拒绝写入并报错，请改用 Shell 启动脚本落点。"
+            format: .yaml,
+            filePath: "~/Library/Application Support/com.yeagoo.dsh-desktop/harness/.credentials.yaml",
+            section: "refs",
+            itemKey: "DEEPSEEK_API_KEY",
+            note: "定点写入 DSH 桌面端凭据（.credentials.yaml 的 refs 区块），支持官方与各类中转网关 Key。注入后重启 DSH 生效。"
         ),
         InjectionTarget(
             id: "codex-cli",
-            name: "Codex CLI 凭证",
-            providerID: "openai",
-            format: .json,
-            filePath: "~/.codex/auth.json",
-            jsonPath: ["OPENAI_API_KEY"],
-            note: "定点替换顶层 `OPENAI_API_KEY`。反例：Codex 新版可能改用 `codex login` 的 OAuth 凭证，请先 dry-run 核对，避免与官方登录态互相覆盖。"
-        ),
-        InjectionTarget(
-            id: "dotenv-project",
-            name: "项目 .env（需指定路径）",
-            providerID: nil,
-            format: .dotenv,
-            filePath: "",
-            note: "适合把密钥写进具体项目的 .env。反例：不要把 .env 提交进 Git；请确认项目 .gitignore 已忽略它。"
-        ),
-        InjectionTarget(
-            id: "custom-json",
-            name: "自定义 JSON 落点",
-            providerID: nil,
-            format: .json,
-            filePath: "",
-            jsonPath: [],
-            isCustom: true,
-            note: "需填写文件路径与键路径（如 `env.MY_KEY`）。反例：不支持数组下标之外的复杂表达式。"
-        ),
-        InjectionTarget(
-            id: "custom-yaml",
-            name: "自定义 YAML 落点",
-            providerID: nil,
-            format: .yaml,
-            filePath: "",
-            section: nil,
-            itemKey: nil,
-            isCustom: true,
-            note: "按「区块 + 键」做定点行替换，不重排注释。反例：多层嵌套或流式写法（`{a: b}`）不在支持范围内。"
-        ),
-        InjectionTarget(
-            id: "custom-toml",
-            name: "自定义 TOML 落点",
+            name: "Codex 独立 Profile 凭证 (TOML)",
             providerID: nil,
             format: .toml,
-            filePath: "",
-            section: nil,
-            itemKey: nil,
-            isCustom: true,
-            note: "定位 `[section]` 后替换 `key = value`。反例：内联表与数组表（`[[x]]`）不在支持范围内。"
-        ),
-        InjectionTarget(
-            id: "custom-plist",
-            name: "自定义 plist 落点",
-            providerID: nil,
-            format: .plist,
-            filePath: "",
-            jsonPath: [],
-            isCustom: true,
-            note: "经系统 PropertyListSerialization 读写，会重排格式但保留全部键值。"
-        ),
-        InjectionTarget(
-            id: "env-only",
-            name: "仅生成导出片段（不写文件）",
-            providerID: nil,
-            format: .none,
-            note: "最安全选项：只输出 `export KEY=...` 片段供你自行粘贴，本工具不碰任何文件。"
+            filePath: "~/.codex/company.config.toml",
+            section: "env",
+            itemKey: "OPENAI_API_KEY",
+            note: "写入独立的 ~/.codex/company.config.toml，与官方 ChatGPT 登录态完全隔离，保证桌面端稳定启动不受影响。"
         )
     ]
 }

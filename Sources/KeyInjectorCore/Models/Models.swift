@@ -88,6 +88,8 @@ public struct KeyRecord: Codable, Hashable, Identifiable, Sendable {
     public var priority: Int
     public var tags: [String]
     public var note: String
+    /// 自定义 API 基址（中转商 / 代理网关地址；nil 则使用厂商默认 baseURL）
+    public var baseURL: String?
     public var createdAt: Date
     public var updatedAt: Date
     /// 最近一次健康探测结果
@@ -103,6 +105,7 @@ public struct KeyRecord: Codable, Hashable, Identifiable, Sendable {
         priority: Int = 100,
         tags: [String] = [],
         note: String = "",
+        baseURL: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         lastCheck: CheckSummary? = nil
@@ -116,6 +119,7 @@ public struct KeyRecord: Codable, Hashable, Identifiable, Sendable {
         self.priority = priority
         self.tags = tags
         self.note = note
+        self.baseURL = baseURL
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastCheck = lastCheck

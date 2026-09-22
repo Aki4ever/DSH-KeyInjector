@@ -88,6 +88,7 @@ enum JSONMapping {
             "priority": r.priority,
             "tags": r.tags,
             "note": r.note,
+            "baseURL": r.baseURL ?? "",
             "createdAt": ISO8601DateFormatter().string(from: r.createdAt),
             "updatedAt": ISO8601DateFormatter().string(from: r.updatedAt),
             "lastCheck": check(r.lastCheck)

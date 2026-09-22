@@ -36,8 +36,11 @@ public final class HealthChecker {
     }
 
     /// 依据厂商定义构造探测请求
-    public func makeRequest(provider: Provider, secret: String) -> URLRequest? {
-        guard let base = provider.baseURL, let healthPath = provider.healthPath else { return nil }
+    public func makeRequest(provider: Provider, secret: String, overrideBaseURL: String? = nil) -> URLRequest? {
+        let baseCandidate = (overrideBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? overrideBaseURL!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : provider.baseURL
+        guard let base = baseCandidate, let healthPath = provider.healthPath else { return nil }
         var urlString = base.hasSuffix("/") ? String(base.dropLast()) : base
         urlString += healthPath.hasPrefix("/") ? healthPath : "/" + healthPath
 
@@ -45,7 +48,13 @@ public final class HealthChecker {
             guard var comps = URLComponents(string: urlString) else { return nil }
             comps.queryItems = [URLQueryItem(name: "key", value: secret)]
             guard let url = comps.url else { return nil }
-            return URLRequest(url: url)
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            if overrideBaseURL != nil || secret.hasPrefix("AQ.") {
+                request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+            }
+            request.setValue("KeyInjector/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
+            return request
         }
 
         guard let url = URL(string: urlString) else { return nil }
@@ -67,8 +76,8 @@ public final class HealthChecker {
     }
 
     /// 探测单个密钥
-    public func check(provider: Provider, secret: String) async -> CheckSummary {
-        guard let request = makeRequest(provider: provider, secret: secret) else {
+    public func check(provider: Provider, secret: String, overrideBaseURL: String? = nil) async -> CheckSummary {
+        guard let request = makeRequest(provider: provider, secret: secret, overrideBaseURL: overrideBaseURL) else {
             return CheckSummary(
                 status: .unknown,
                 message: "该厂商未配置探测端点（可在 config/providers.json 中补充 baseURL 与 healthPath）"
@@ -110,7 +119,7 @@ public final class HealthChecker {
             for item in items {
                 group.addTask { [transport] in
                     let checker = HealthChecker(transport: transport)
-                    let summary = await checker.check(provider: item.provider, secret: item.secret)
+                    let summary = await checker.check(provider: item.provider, secret: item.secret, overrideBaseURL: item.record.baseURL)
                     return (item.record.id, summary)
                 }
             }

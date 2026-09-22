@@ -109,6 +109,8 @@ struct KeyInjectCLI {
       check                             健康探测（--id <密钥id> 单个 / --all 全部）
       audit [--limit N]                 查看审计日志
       config dump                       导出可编辑的厂商与落点配置模板
+      gateway check                     体检 Codex 网关模型是否被正确路由到 codex_gateway
+      gateway repair [--yes]            修复路由（默认 dry-run，--yes 才落盘，写入前自动备份）
 
     通用参数：
       --json                            以 JSON 输出（便于 DSH 会话解析）
@@ -158,6 +160,7 @@ struct KeyInjectCLI {
         case "check":               await runCheck(service, args)
         case "audit":               runAudit(service, args)
         case "config":              runConfig(service, args)
+        case "gateway":             runGateway(service, args)
         default:
             fail("未知子命令：\(command)（运行 keyinject --help 查看用法）")
         }
@@ -531,5 +534,54 @@ struct KeyInjectCLI {
             }
             print("   编辑后重启本工具即可生效（同 id 覆盖内置项，新 id 追加）。")
         } catch { fail("\(error)") }
+    }
+
+    // MARK: gateway（Codex 网关路由守护）
+
+    static func runGateway(_ service: KeyInjectorService, _ args: Args) {
+        let action = args.rest.first ?? "check"
+        let configPath = args.value("config")
+        switch action {
+        case "check":
+            let status = service.checkCodexGatewayRouting(configPath: configPath)
+            if Out.jsonMode {
+                Out.json(["ok": status.healthy, "configPath": status.configPath, "model": status.model ?? "",
+                          "provider": status.provider ?? "", "exists": status.exists, "summary": status.summary])
+                exit(status.healthy ? 0 : 1)
+            }
+            Out.box("Codex 网关路由体检")
+            print(status.summary)
+            if !status.healthy {
+                print("   修复：keyinject gateway repair --yes")
+            }
+            exit(status.healthy ? 0 : 1)
+
+        case "repair":
+            let dryRun = !args.flag("yes")
+            do {
+                let result = try service.repairCodexGatewayRouting(configPath: configPath, dryRun: dryRun)
+                if Out.jsonMode {
+                    Out.json(["ok": true, "changed": result.changed, "dryRun": result.dryRun,
+                              "backupPath": result.backupPath ?? "", "configPath": result.status.configPath,
+                              "model": result.status.model ?? "", "provider": result.status.provider ?? "",
+                              "summary": result.status.summary])
+                    return
+                }
+                Out.box("Codex 网关路由修复")
+                print(result.status.summary)
+                if !result.changed {
+                    print("✅ 无需修复，配置已是网关路由。")
+                } else if result.dryRun {
+                    print("（dry-run，未写入。确认后加 --yes 落盘）")
+                    if let preview = result.preview { print(preview) }
+                } else {
+                    print("✅ 已写入修复结果；原文件已备份：\(result.backupPath ?? "(无备份)")")
+                    print("   完全退出并重新打开 Codex 后生效。")
+                }
+            } catch { fail("\(error)") }
+
+        default:
+            fail("用法：keyinject gateway [check | repair [--yes]] [--config <config.toml 路径>]")
+        }
     }
 }

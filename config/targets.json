@@ -1,104 +1,28 @@
 [
   {
-    "filePath" : "~/.zshrc",
-    "format" : "shellExport",
-    "id" : "shell-profile",
+    "filePath" : "~/Library/Application Support/com.yeagoo.dsh-desktop/harness/.credentials.yaml",
+    "format" : "yaml",
+    "id" : "dsh-desktop",
     "isCustom" : false,
+    "itemKey" : "DEEPSEEK_API_KEY",
     "jsonPath" : [
 
     ],
-    "name" : "Shell 启动脚本（通用推荐）",
-    "note" : "写入受管区块 `# >>> KeyInjector >>>`，幂等可重复执行。反例：fish / csh 用户无效，请改选自定义落点。"
+    "name" : "DSH 桌面端凭据 (YAML)",
+    "note" : "定点写入 DSH 桌面端凭据（.credentials.yaml 的 refs 区块），支持官方与兼容网关 Key。注入后重启 DSH 即生效。",
+    "section" : "refs"
   },
   {
-    "filePath" : "~/.claude/settings.json",
-    "format" : "json",
-    "id" : "claude-code",
-    "isCustom" : false,
-    "jsonPath" : [
-      "env",
-      "ANTHROPIC_API_KEY"
-    ],
-    "name" : "Claude Code 设置",
-    "note" : "定点替换 `env.ANTHROPIC_API_KEY`，保留原文件缩进与键序。反例：若该文件不存在或没有 env 对象，本工具会拒绝写入并报错，请改用 Shell 启动脚本落点。",
-    "providerID" : "anthropic"
-  },
-  {
-    "filePath" : "~/.codex/auth.json",
-    "format" : "json",
+    "filePath" : "~/.codex/company.config.toml",
+    "format" : "toml",
     "id" : "codex-cli",
     "isCustom" : false,
-    "jsonPath" : [
-      "OPENAI_API_KEY"
-    ],
-    "name" : "Codex CLI 凭证",
-    "note" : "定点替换顶层 `OPENAI_API_KEY`。反例：Codex 新版可能改用 `codex login` 的 OAuth 凭证，请先 dry-run 核对，避免与官方登录态互相覆盖。",
-    "providerID" : "openai"
-  },
-  {
-    "filePath" : "",
-    "format" : "dotenv",
-    "id" : "dotenv-project",
-    "isCustom" : false,
+    "itemKey" : "OPENAI_API_KEY",
     "jsonPath" : [
 
     ],
-    "name" : "项目 .env（需指定路径）",
-    "note" : "适合把密钥写进具体项目的 .env。反例：不要把 .env 提交进 Git；请确认项目 .gitignore 已忽略它。"
-  },
-  {
-    "filePath" : "",
-    "format" : "json",
-    "id" : "custom-json",
-    "isCustom" : true,
-    "jsonPath" : [
-
-    ],
-    "name" : "自定义 JSON 落点",
-    "note" : "需填写文件路径与键路径（如 `env.MY_KEY`）。反例：不支持数组下标之外的复杂表达式。"
-  },
-  {
-    "filePath" : "",
-    "format" : "yaml",
-    "id" : "custom-yaml",
-    "isCustom" : true,
-    "jsonPath" : [
-
-    ],
-    "name" : "自定义 YAML 落点",
-    "note" : "按「区块 + 键」做定点行替换，不重排注释。反例：多层嵌套或流式写法（`{a: b}`）不在支持范围内。"
-  },
-  {
-    "filePath" : "",
-    "format" : "toml",
-    "id" : "custom-toml",
-    "isCustom" : true,
-    "jsonPath" : [
-
-    ],
-    "name" : "自定义 TOML 落点",
-    "note" : "定位 `[section]` 后替换 `key = value`。反例：内联表与数组表（`[[x]]`）不在支持范围内。"
-  },
-  {
-    "filePath" : "",
-    "format" : "plist",
-    "id" : "custom-plist",
-    "isCustom" : true,
-    "jsonPath" : [
-
-    ],
-    "name" : "自定义 plist 落点",
-    "note" : "经系统 PropertyListSerialization 读写，会重排格式但保留全部键值。"
-  },
-  {
-    "filePath" : "",
-    "format" : "none",
-    "id" : "env-only",
-    "isCustom" : false,
-    "jsonPath" : [
-
-    ],
-    "name" : "仅生成导出片段（不写文件）",
-    "note" : "最安全选项：只输出 `export KEY=...` 片段供你自行粘贴，本工具不碰任何文件。"
+    "name" : "Codex 独立 Profile 凭证 (TOML)",
+    "note" : "写入独立的 ~/.codex/company.config.toml，与官方 ChatGPT 登录态完全隔离，保证桌面端稳定启动不受影响。",
+    "section" : "env"
   }
 ]

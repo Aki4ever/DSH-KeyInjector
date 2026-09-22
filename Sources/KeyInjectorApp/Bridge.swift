@@ -85,7 +85,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         case "keys":
             let reveal = (params["reveal"] as? Bool) ?? false
             return try service.listKeys().map { record in
-                JSONMapping.record(record, secret: reveal ? try? service.secret(for: record.id) : nil)
+                var secret: String? = nil
+                if let cached = secretCache[record.id] {
+                    secret = cached
+                } else if reveal {
+                    secret = try? service.secret(for: record.id)
+                    if let s = secret { secretCache[record.id] = s }
+                }
+                return JSONMapping.record(record, secret: secret)
             }
 
         case "addKey":
@@ -95,14 +102,83 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let priority = (params["priority"] as? Int) ?? 100
             let tags = (params["tags"] as? [String]) ?? []
             let note = (params["note"] as? String) ?? ""
+            let baseURL = params["baseURL"] as? String
             let record = try service.addKey(providerID: providerID, label: label, secret: secret,
-                                            priority: priority, tags: tags, note: note)
+                                            priority: priority, tags: tags, note: note, baseURL: baseURL)
             secretCache[record.id] = secret.trimmingCharacters(in: .whitespacesAndNewlines)
             let provider = service.provider(id: providerID) ?? Provider(id: providerID, name: providerID, envKeys: [])
             return [
                 "record": JSONMapping.record(record, secret: nil),
                 "warnings": SecretValidator.warnings(secret: secret, provider: provider)
             ]
+
+        case "updateKey":
+            let id = (params["id"] as? String) ?? ""
+            let label = params["label"] as? String
+            let secret = params["secret"] as? String
+            let priority = params["priority"] as? Int
+            let tags = params["tags"] as? [String]
+            let note = params["note"] as? String
+            let baseURL = params["baseURL"] as? String
+            let record = try service.updateKey(
+                id: id,
+                label: label,
+                secret: secret,
+                priority: priority,
+                tags: tags,
+                note: note,
+                baseURL: baseURL
+            )
+            if let secret, !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                secretCache[record.id] = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let provider = service.provider(id: record.providerID) ?? Provider(id: record.providerID, name: record.providerID, envKeys: [])
+            var warnings: [String] = []
+            if let secret, !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                warnings = SecretValidator.warnings(secret: secret, provider: provider)
+            }
+            return [
+                "record": JSONMapping.record(record, secret: nil),
+                "warnings": warnings
+            ]
+
+        case "saveTarget":
+            let id = ((params["id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = ((params["name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let providerIDRaw = ((params["providerID"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let providerID = providerIDRaw.isEmpty ? nil : providerIDRaw
+            let formatRaw = ((params["format"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let format = InjectionFormat(rawValue: formatRaw) else {
+                throw BridgeError.badRequest("不支持的注入格式：\(formatRaw)")
+            }
+            let filePath = ((params["filePath"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawJsonPath = ((params["jsonPath"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let jsonPath = rawJsonPath.isEmpty ? [] : rawJsonPath.split(separator: ".").map { String($0) }
+            let sectionRaw = ((params["section"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let section = sectionRaw.isEmpty ? nil : sectionRaw
+            let itemKeyRaw = ((params["itemKey"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let itemKey = itemKeyRaw.isEmpty ? nil : itemKeyRaw
+            let note = ((params["note"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let target = InjectionTarget(
+                id: id.isEmpty ? "custom-\(UUID().uuidString.prefix(8).lowercased())" : id,
+                name: name.isEmpty ? "自定义落点" : name,
+                providerID: providerID,
+                format: format,
+                filePath: filePath,
+                jsonPath: jsonPath,
+                section: section,
+                itemKey: itemKey,
+                isCustom: true,
+                note: note.isEmpty ? "用户自定义落点" : note
+            )
+            try service.addCustomTarget(target)
+            return JSONMapping.target(target)
+
+        case "deleteTarget":
+            let id = (params["id"] as? String) ?? ""
+            try service.removeCustomTarget(id: id)
+            return ["id": id]
 
         case "deleteKey":
             let id = (params["id"] as? String) ?? ""
@@ -134,9 +210,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 overridePath: (params["overridePath"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                 jsonPathOverride: jsonPath,
                 sectionOverride: (params["section"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                itemKeyOverride: (params["itemKey"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                itemKeyOverride: (params["itemKey"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                cachedSecret: secretCache[keyID]
             )
-            let secret = (try? service.secret(for: keyID)) ?? ""
+            let secret = secretCache[keyID] ?? (try? service.secret(for: keyID)) ?? ""
             return JSONMapping.plan(plan, reveal: reveal, secret: secret)
 
         case "apply":
@@ -152,7 +229,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 overridePath: (params["overridePath"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                 jsonPathOverride: jsonPath,
                 sectionOverride: (params["section"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                itemKeyOverride: (params["itemKey"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                itemKeyOverride: (params["itemKey"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                cachedSecret: secretCache[keyID]
             )
             let outcome = try service.applyInjection(plan)
             var out = JSONMapping.outcome(outcome)
