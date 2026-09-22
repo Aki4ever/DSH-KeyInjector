@@ -55,8 +55,8 @@
     ]
   },
   {
-    "authStyle" : "queryKey",
-    "baseURL" : "https://generativelanguage.googleapis.com/v1beta",
+    "authStyle" : "bearer",
+    "baseURL" : "https://generativelanguage.googleapis.com/v1beta/openai",
     "consoleURL" : "https://aistudio.google.com/app/apikey",
     "envKeys" : [
       "GEMINI_API_KEY"

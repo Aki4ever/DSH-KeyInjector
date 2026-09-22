@@ -315,6 +315,45 @@
 | **验收断言** | ① DeepSeek 真 key：识别后可同时看到模型清单与账户余额；② 非 DeepSeek key：只做模型段，额度位如实标注；③ 额度段超时/失败不影响 `probed` 与模型列表；④ 缓存 `model-cache.json` 仍只含掩码、指纹、模型名、端点、时间与额度数值，**不含明文**（余额字段同样不落明文凭据） |
 | **验证证据** | `Service.discoverModels` / `runDiscovery`；`Models/ModelDiscovery.swift`；CLI `keyinject models probe --id <id>` 输出含额度段小结 |
 
+### REQ-027 · Google Gemini 认证形态修正（兼容端点 + Bearer）
+
+| 项 | 内容 |
+| :--- | :--- |
+| **状态** | ✅ 已实施并验证 |
+| **实施版本** | v2.0.0（配置层热修，无需重新打包） |
+| **需求描述** | 用户提供 AI Studio 新生成的 `AQ.` 形态凭据后，工具探测持续 401。需要定位「是密钥不对还是调用方式不对」并修好 |
+| **根因（实测）** | 同一把凭据两种调用方式结果相反：`GET /v1beta/models?key=<凭据>` → **401 `API keys are not supported by this API. Expected OAuth2 access token...`**；`GET /v1beta/openai/models` + `Authorization: Bearer <凭据>` → **200，返回 59 个模型**。即凭据有效，**端点与鉴权形态不匹配**——AI Studio 现在发放的 `AQ.` 形态凭据走 Gemini 的 OpenAI 兼容入口 |
+| **修复方式** | 厂商预设 google 的 `baseURL` 改为 `https://generativelanguage.googleapis.com/v1beta/openai`、`authStyle` 由 `queryKey` 改为 `bearer`（写进**数据目录**的 `config/providers.json`；仓库模板同步，仓库内改不生效是因为工具只读数据目录的运行时覆盖） |
+| **顺带查清的坑** | `EndpointProtocol.authOverride` 只在 key **自带自定义端点**（`baseURL` 含 `/openai`）时才覆盖鉴权风格；预设端点不触发它，因此必须同时改预设的 `baseURL` 与 `authStyle`，只改其一无效 |
+| **验收断言** | ① `keyinject check --id <google key>` 由 401 变为「有效 / HTTP 200」；② `keyinject models probe --id` 返回 59 个模型；③ 接口无关：其他厂商预设不受影响 |
+| **验证证据** | 实测输出：`状态: 有效  HTTP: 200  耗时: 482 ms`；`端点探测成功（厂商预设端点 /models，HTTP 200，59 个模型）` |
+
+### REQ-028 · 凭据时效治理（过期预警 + 自动续期）
+
+| 项 | 内容 |
+| :--- | :--- |
+| **状态** | 🟡 实施中（需求已确认，方案待用户选定） |
+| **实施版本** | 待定（v2.1.0 候选） |
+| **需求描述** | 用户原话：「确认一下那经常过时的问题是否在」。经追问确认为**凭据过期**：存进去的凭据过一段时间就打不通 |
+| **现状核查（如实）** | ① **问题确实存在，但只在部分凭据形态上**：OAuth 访问令牌有小时级有效期；API key 形态通常长期有效。实测证据：用户从对话中提供的令牌在 40 分钟后仍返回 200（说明并非全部凭据都是 1 小时短命），而 `AQ.` 类凭据对错误端点则表现为 401。② **工具目前完全没有时效治理**：`vault.json` 记录字段只有 `createdAt / updatedAt / lastCheck / fingerprint / hint ...`，**没有 `expiresAt`**；`HealthChecker` 不解析任何过期字段；`Sources/` 全项目**不处理 `refresh_token`**（仅有 Codex 网关配置里的无关字符串） |
+| **后果** | 凭据失效时，工具只能在下一次健康探测或识别时给出 401，**不会提前预警**，也不会自动续期；用户感知即「经常过时，用着用着就打不通」 |
+| **方案（待定项）** | ① **过期预警**：健康探测解析 401/`token expired` 等信号 → 界面与 CLI 明确标注「凭据已失效，需更换」；② **时效可见**：密钥卡显示「上次验证时间 + 验证结果」；③ **自动续期**：识别 `refresh_token` 型凭据并自动换新 access token |
+| **验收断言** | ① 凭据失效时界面明确提示而非静默失败；② 每一把凭据都能看到「上次验证时间与结果」；③ 若采纳自动续期，订阅账号在令牌轮换后无需人工干预 |
+| **验证证据** | 待实施后补 |
+
+### REQ-029 · 订阅账号（Google AI Pro / Gemini 订阅）纳入管理
+
+| 项 | 内容 |
+| :--- | :--- |
+| **状态** | 🟡 阻塞（缺前置条件：本机无订阅凭据） |
+| **实施版本** | 待定 |
+| **需求描述** | 用户要求「把这个订阅账号也集成到账号管理器中」，并明确「订阅账号」指 **Google 订阅账号（AI Pro / Gemini 订阅）** |
+| **前置条件核查** | 本机**不存在任何 Google 订阅凭据**：无 `~/.gemini/oauth_creds.json`、无 `~/.config/gcloud/`、未安装 `gemini` / `gcloud` / `antigravity` 命令。因此当前**无凭据可接**，需先确定凭据获取路径 |
+| **待用户决定** | ① 订阅账号的凭据从哪来（用某客户端登录一次以生成带 `refresh_token` 的凭据文件，还是走其他方式）；② 是否接受为此新增 OAuth 登录/续期能力（即 REQ-028 的自动续期） |
+| **价值** | 订阅账号带 `refresh_token`，可自动续期 —— 正好是 REQ-028 的根治手段；反过来说，若只存 API key，则不涉及续期 |
+| **验收断言** | ① 订阅账号入库后可在密钥页看到其身份（账号标识 / 订阅类型）；② 凭据到期能自动或一键续期；③ 其可提供的模型清单可被识别 |
+| **验证证据** | 待实施后补 |
+
 
 ---
 
@@ -361,3 +400,10 @@
 | REQ-020 | `Models/ModelDiscovery.swift` / `HostModelCatalog.bindings` | ✅ 模型发现测试组（9 例）+ 绑定护栏回归 | 密钥库（识别模型按钮）/ 详情（重新探测模型） | `..._Keys_ModelsExpanded.png`、`..._Keys_Detail.png` |
 | REQ-021 | `Service.keyDetail` / `web/app.js` `renderKeyDetail` | ✅ 密钥库分区与详情测试组 | 密钥库（卡片标题 / 详情按钮 / 分区详情按钮） | `..._Keys_Detail.png` |
 | REQ-022 | `DiscoveryCache` / `Sources/keyinject/CLI.swift` | ✅ 模型发现测试组 | — | — |
+| REQ-023 | `Version.swift` / `scripts/build_app.sh` / `scripts/check_version_sync.sh` | 打包实测 + 版本门禁 | 全部（标题与菜单） | 9 张截图（v1.6.0 界面） |
+| REQ-024 | `Models/ModelDiscovery.swift`（`ModelMetadata` / `BalanceInfo`）/ `web/app.js` `modelMetaLine` | ✅ 三维度解析测试组（7 例） | 密钥（模型行 + 额度行） | `..._Keys_ModelsExpanded.png` |
+| REQ-025 | `web/index.html` / `web/app.js` `renderOverviewSummary` / `web/app.css` | 实机启动确认（导航 5 项 + 折叠摘要） | 密钥（跨宿主总览折叠区） | 见 `page_ledger.md` 第四节 |
+| REQ-026 | `Service.runDiscovery` / `ModelDiscovery.probeBalance` | ✅ 额度端到端测试组 | 密钥（额度块） | 见 `page_ledger.md` 第四节 |
+| REQ-027 | 数据目录 `config/providers.json`（google 预设）+ 仓库 `config/providers.json` | ✅ 真机实测（401 → 200，59 模型） | 密钥（Gemini 分区） | — |
+| REQ-028 | 待实施（`HealthChecker` / `vault.json` 时效字段 / `web/app.js` 预警） | 现状已核查，方案待定 | 密钥（凭据时效提示） | — |
+| REQ-029 | 待实施（订阅账号入库与续期） | 🟡 阻塞：本机无订阅凭据 | 密钥（订阅账号分区） | — |
