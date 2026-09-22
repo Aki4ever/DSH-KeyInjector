@@ -136,8 +136,8 @@ struct KeyInjectCLI {
             exit(0)
         }
         if command == "version" || command == "--version" {
-            if Out.jsonMode { Out.json(["ok": true, "name": "KeyInjector", "version": "1.0.0"]) }
-            else { print("KeyInjector CLI v1.0.0") }
+            if Out.jsonMode { Out.json(["ok": true, "name": AppVersion.productName, "version": AppVersion.current]) }
+            else { print("KeyInjector CLI v\(AppVersion.current)") }
             exit(0)
         }
 

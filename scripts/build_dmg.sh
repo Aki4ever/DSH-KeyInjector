@@ -12,10 +12,16 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 APP_NAME="Key注入器"
-VERSION="1.0.0"
 VOLUME_NAME="Key 注入器"
 DIST_DIR="$PROJECT_DIR/dist"
 APP_DIR="$DIST_DIR/${APP_NAME}.app"
+
+# 版本号单一来源：仓库根目录 VERSION 文件
+if [ ! -f "$PROJECT_DIR/VERSION" ]; then
+  echo "❌ 未找到版本文件 $PROJECT_DIR/VERSION"
+  exit 1
+fi
+VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
 DMG_PATH="$DIST_DIR/KeyInjector-${VERSION}.dmg"
 STAGING="$DIST_DIR/dmg-staging"
 

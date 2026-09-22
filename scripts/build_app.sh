@@ -16,8 +16,18 @@ cd "$PROJECT_DIR"
 APP_NAME="Key注入器"
 EXECUTABLE_NAME="KeyInjector"
 BUNDLE_ID="com.aki4ever.keyinjector"
-VERSION="1.0.0"
 BUILD_NUMBER="1"
+
+# 版本号单一来源：仓库根目录 VERSION 文件（避免多处硬编码各自漂移）
+if [ ! -f "$PROJECT_DIR/VERSION" ]; then
+  echo "❌ 未找到版本文件 $PROJECT_DIR/VERSION"
+  exit 1
+fi
+VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
+if [ -z "$VERSION" ]; then
+  echo "❌ 版本文件内容为空"
+  exit 1
+fi
 
 DIST_DIR="$PROJECT_DIR/dist"
 APP_DIR="$DIST_DIR/${APP_NAME}.app"

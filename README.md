@@ -31,10 +31,11 @@ open dist/KeyInjector-1.0.0.dmg      # 挂载后把「Key注入器」拖入 Appl
 
 ```bash
 # 依赖：macOS 13+，Swift 6.x 工具链（本机为 Command Line Tools，无需完整 Xcode）
-swift build                 # 编译核心库 + CLI + 桌面应用
-./scripts/run_tests.sh      # 质量门禁：38 项自动化测试必须全绿
-./scripts/build_app.sh      # 产出 dist/Key注入器.app
-./scripts/build_dmg.sh      # 产出 dist/KeyInjector-1.0.0.dmg
+swift build                      # 编译核心库 + CLI + 桌面应用
+./scripts/run_tests.sh           # 质量门禁：38 项自动化测试必须全绿
+./scripts/build_app.sh           # 产出 dist/Key注入器.app
+./scripts/build_dmg.sh           # 产出 dist/KeyInjector-1.0.0.dmg
+./scripts/check_version_sync.sh  # 版本一致性门禁（源文件/代码/文档/产物四处对齐）
 ```
 
 ### 方式三：仅用命令行
@@ -84,6 +85,8 @@ swift run keyinject --help
 
 ```text
 .
+├── VERSION                       # 版本号单一来源（全工程一致性由门禁脚本校验）
+├── CHANGELOG.md                  # 变更日志
 ├── Package.swift                 # SPM 工程定义（3 个 target + 1 个测试 target）
 ├── Sources/
 │   ├── KeyInjectorCore/          # 核心库
