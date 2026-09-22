@@ -144,6 +144,8 @@ function switchPage(page) {
     renderRollbackList();
   } else if (page === 'keys') {
     renderKeys();
+  } else if (page === 'models') {
+    loadModels();
   }
 }
 
@@ -1215,3 +1217,135 @@ window.__snapshotSetPath = function (path) {
 window.__snapshotPlan = function () { return doPlan(); };
 
 window.addEventListener('DOMContentLoaded', boot);
+
+
+/* ---------- 模型清单（Codex 模型目录可视化） ---------- */
+
+state.models = null;
+state.modelsOverview = null;
+
+async function loadModels() {
+  try {
+    const all = $('#models-show-all') && $('#models-show-all').checked;
+    const data = await call('models', { all: !!all });
+    state.models = data.models || [];
+    state.modelsOverview = data.overview || {};
+    renderRouteCard();
+    renderModels();
+  } catch (e) {
+    $('#models-host').innerHTML = '<div class="empty">读取模型目录失败：' + esc(e.message) + '</div>';
+  }
+}
+
+async function renderRouteCard() {
+  const host = $('#route-card');
+  try {
+    const r = await call('gatewayCheck');
+    const ok = r.healthy;
+    host.innerHTML =
+      '<h2>Codex 网关路由体检</h2>' +
+      '<div class="small ' + (ok ? 'ok-text' : 'bad-text') + '">' + esc(r.summary) + '</div>' +
+      '<div class="small dim" style="margin-top:6px">配置文件：' + esc(r.configPath) + '</div>' +
+      '<div style="margin-top:10px"><button class="btn ' + (ok ? '' : 'primary') + '" id="btn-route-fix"' + (ok ? ' disabled' : '') + '>修复路由（写回 codex_gateway）</button>' +
+      '<span class="small dim" style="margin-left:8px">launchd 常驻守护每 10 秒自动体检一次，通常无需手动修复</span></div>';
+    const btn = $('#btn-route-fix');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const res = await call('gatewayRepair');
+          banner('success', '已修复路由：' + res.summary + (res.backupPath ? '（备份：' + res.backupPath + '）' : ''));
+        } catch (e) {
+          banner('error', '修复失败：' + e.message);
+        }
+        renderRouteCard();
+      });
+    }
+  } catch (e) {
+    host.innerHTML = '<div class="empty">路由体检失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderModels() {
+  const ov = state.modelsOverview || {};
+  if ($('#catalog-path')) $('#catalog-path').textContent = ov.catalogPath || '~/.codex/codex-gateway-models.json';
+
+  $('#models-origin').innerHTML =
+    '<h2>清单从哪来</h2>' +
+    '<div class="small">① Codex 官方条目：来自 Codex 自带的 <code>codex debug models --bundled</code>，本工具不改动它们。</div>' +
+    '<div class="small">② 公司网关条目：由「密钥库 → 一键注入」或 <code>keyinject models add</code> 写入，' +
+    '显示名带「（公司网关）」后缀，并在 <code>config.toml</code> 里通过 <code>model_provider = "codex_gateway"</code> 路由到你的网关 <code>' + esc(ov.configProvider || '-') + '</code>。</div>' +
+    '<div class="small dim" style="margin-top:8px">目录共 ' + (ov.total || 0) + ' 条：公司网关 ' + (ov.gateway || 0) + ' 条（菜单可见 ' + (ov.gatewayInPicker || 0) + '），官方 ' + ((ov.total || 0) - (ov.gateway || 0)) + ' 条（菜单可见 ' + (ov.officialInPicker || 0) + '）。' +
+    '已注册到 config.toml：' + (ov.registeredInConfig ? '是' : '否') + '；当前默认模型：' + esc(ov.configModel || '(未设置)') + '。</div>';
+
+  const host = $('#models-host');
+  if (!state.models || !state.models.length) {
+    host.innerHTML = '<div class="empty">还没有公司网关模型。点右上角「＋ 新增网关模型」，或到「注入中心」执行一键注入来自动登记。</div>';
+    return;
+  }
+  let html = '<h2>条目明细</h2>';
+  state.models.forEach((m) => {
+    const chipCls = m.isGateway ? 'chip warn' : 'chip';
+    html += '<div class="key-row">' +
+      '<span class="status ' + (m.inPicker ? 's-valid' : 's-unchecked') + '"></span>' +
+      '<div class="key-main">' +
+        '<div class="key-title"><span class="key-label">' + esc(m.displayName) + '</span>' +
+        '<span class="' + chipCls + '">' + esc(m.source) + '</span>' +
+        '<span class="chip">' + (m.inPicker ? '菜单可见' : '已隐藏') + '</span></div>' +
+        '<div class="key-meta"><code>' + esc(m.slug) + '</code></div>' +
+        (m.description ? '<div class="small dim" style="margin-top:3px">' + esc(m.description) + '</div>' : '') +
+      '</div>' +
+      '<button class="btn small" data-model-toggle="' + esc(m.slug) + '" data-in-picker="' + (m.inPicker ? '1' : '0') + '">' + (m.inPicker ? '隐藏' : '显示') + '</button>' +
+      (m.isGateway ? '<button class="btn small danger" data-model-rm="' + esc(m.slug) + '">删除</button>' : '') +
+      '</div>';
+  });
+  host.innerHTML = html;
+
+  host.querySelectorAll('[data-model-toggle]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const slug = el.dataset.modelToggle;
+      const next = el.dataset.inPicker !== '1';
+      try {
+        await call('setModelPicker', { slug: slug, inPicker: next });
+        banner('success', '已把 ' + slug + ' 设为' + (next ? '菜单可见' : '隐藏') + '（重启 Codex 后生效）');
+        loadModels();
+      } catch (e) {
+        banner('error', '切换失败：' + e.message);
+      }
+    });
+  });
+  host.querySelectorAll('[data-model-rm]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const slug = el.dataset.modelRm;
+      if (!confirm('从模型目录删除 ' + slug + '？Codex 菜单里将不再出现该条目。')) return;
+      try {
+        const res = await call('removeModel', { slug: slug });
+        banner(res.removed ? 'success' : 'error', res.removed ? '已删除 ' + slug : '未删除：' + slug);
+        loadModels();
+      } catch (e) {
+        banner('error', '删除失败：' + e.message);
+      }
+    });
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const addBtn = $('#btn-model-add');
+  if (addBtn) {
+    addBtn.addEventListener('click', async () => {
+      const slug = prompt('网关侧真实模型名（例如 ark/DeepSeek-V4.1-Flash）');
+      if (!slug) return;
+      const name = prompt('Codex 菜单里的显示名（例如 DeepSeek V4.1（公司网关））', slug + '（公司网关）');
+      if (!name) return;
+      try {
+        const res = await call('addModel', { slug: slug, name: name, inPicker: true });
+        banner(res.added ? 'success' : 'error', res.added ? '已新增 ' + slug + '，重启 Codex 后出现在顶部菜单' : '该 slug 已存在：' + slug);
+        loadModels();
+      } catch (e) {
+        banner('error', '新增失败：' + e.message);
+      }
+    });
+  }
+  const allSwitch = $('#models-show-all');
+  if (allSwitch) allSwitch.addEventListener('change', loadModels);
+});

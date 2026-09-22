@@ -282,12 +282,79 @@ public final class KeyInjectorService {
         audit.latestBackup(targetID: targetID, filePath: filePath)
     }
 
+    // MARK: - Codex 模型目录（可视化来源与投放）
+
+    /// 读取 Codex 模型目录（默认只返回公司网关条目，`includeOfficial` 为真时返回全部）
+    public func codexCatalogEntries(includeOfficial: Bool = false) -> [CodexCatalogEntry] {
+        let entries = CodexCatalogStore.load()
+        return includeOfficial ? entries : entries.filter { $0.isGateway }
+    }
+
+    /// 目录概览：路径、条目数、菜单可见数与 config.toml 注册状态
+    public func codexCatalogOverview() -> [String: Any] {
+        let path = CodexCatalogStore.defaultPath
+        let entries = CodexCatalogStore.load(path: path)
+        let gateway = entries.filter { $0.isGateway }
+        let configPath = PathKit.expand("~/.codex/config.toml")
+        let configText = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
+        return [
+            "catalogPath": path,
+            "catalogExists": FileManager.default.fileExists(atPath: path),
+            "total": entries.count,
+            "gateway": gateway.count,
+            "gatewayInPicker": gateway.filter { $0.inPicker }.count,
+            "officialInPicker": entries.filter { !$0.isGateway && $0.inPicker }.count,
+            "registeredInConfig": configText.contains(path),
+            "configPath": configPath,
+            "configModel": InjectionEngine.firstModelSlug(in: configText) ?? "",
+            "configProvider": InjectionEngine.firstAssignmentValue("model_provider", in: configText) ?? ""
+        ]
+    }
+
+    /// 新增公司网关模型到目录
+    @discardableResult
+    public func addCodexGatewayModel(slug: String, displayName: String, description: String = "", inPicker: Bool = true) throws -> Bool {
+        try CodexCatalogStore.addGatewayModel(slug: slug, displayName: displayName,
+                                             description: description.isEmpty ? "Company gateway model registered by KeyInjector." : description,
+                                             inPicker: inPicker)
+    }
+
+    /// 切换条目是否出现在桌面端模型菜单
+    @discardableResult
+    public func setCodexModelInPicker(slug: String, inPicker: Bool) throws -> Bool {
+        try CodexCatalogStore.setInPicker(slug: slug, inPicker: inPicker)
+    }
+
+    /// 删除公司网关模型条目
+    @discardableResult
+    public func removeCodexGatewayModel(slug: String) throws -> Bool {
+        try CodexCatalogStore.removeGatewayModel(slug: slug)
+    }
+
     // MARK: - Codex 网关 provider 路由守护
+
+    /// Codex 配置目录：优先 `CODEX_HOME` 环境变量，其次 `~/.codex`。
+    /// launchd 守护可用 plist 的 EnvironmentVariables 指向沙箱目录做隔离验证。
+    public static func codexHome() -> String {
+        if let env = ProcessInfo.processInfo.environment["CODEX_HOME"], !env.isEmpty {
+            return PathKit.expand(env)
+        }
+        return PathKit.expand("~/.codex")
+    }
+
+    public static func defaultCodexConfigPath(explicit: String? = nil) -> String {
+        if let explicit, !explicit.isEmpty { return PathKit.expand(explicit) }
+        return (codexHome() as NSString).appendingPathComponent("config.toml")
+    }
+
+    public static func defaultCodexCatalogPath() -> String {
+        (codexHome() as NSString).appendingPathComponent("codex-gateway-models.json")
+    }
 
     /// 检查 `~/.codex/config.toml` 是否把当前网关模型路由到 `codex_gateway`
     public func checkCodexGatewayRouting(configPath: String? = nil) -> GatewayRoutingStatus {
-        let path = PathKit.expand(configPath ?? "~/.codex/config.toml")
-        let catalog = PathKit.expand("~/.codex/codex-gateway-models.json")
+        let path = Self.defaultCodexConfigPath(explicit: configPath)
+        let catalog = Self.defaultCodexCatalogPath()
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
             return GatewayRoutingStatus(configPath: path, model: nil, provider: nil, healthy: true, exists: false)
         }
@@ -305,8 +372,8 @@ public final class KeyInjectorService {
     /// 修复网关模型的路由（必要时先备份再原子写入）
     @discardableResult
     public func repairCodexGatewayRouting(configPath: String? = nil, dryRun: Bool = true) throws -> GatewayRoutingRepair {
-        let path = PathKit.expand(configPath ?? "~/.codex/config.toml")
-        let catalog = PathKit.expand("~/.codex/codex-gateway-models.json")
+        let path = Self.defaultCodexConfigPath(explicit: configPath)
+        let catalog = Self.defaultCodexCatalogPath()
         let url = URL(fileURLWithPath: path)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {
             throw ServiceError.invalidArgument("找不到 Codex 配置文件：\(path)")

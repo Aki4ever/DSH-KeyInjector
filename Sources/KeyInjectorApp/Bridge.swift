@@ -264,6 +264,53 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let written = try service.exportConfigTemplates()
             return ["written": written, "dir": service.root.appendingPathComponent("config").path]
 
+        case "models":
+            let includeOfficial = (params["all"] as? Bool) ?? false
+            let entries = service.codexCatalogEntries(includeOfficial: includeOfficial)
+            return [
+                "overview": service.codexCatalogOverview(),
+                "models": entries.map { entry -> [String: Any] in
+                    [
+                        "slug": entry.slug,
+                        "displayName": entry.displayName,
+                        "description": entry.description,
+                        "source": entry.sourceLabel,
+                        "isGateway": entry.isGateway,
+                        "inPicker": entry.inPicker
+                    ]
+                }
+            ]
+
+        case "addModel":
+            let slug = (params["slug"] as? String) ?? ""
+            let name = (params["name"] as? String) ?? slug
+            let desc = (params["desc"] as? String) ?? ""
+            let inPicker = (params["inPicker"] as? Bool) ?? true
+            let added = try service.addCodexGatewayModel(slug: slug, displayName: name, description: desc, inPicker: inPicker)
+            return ["added": added, "slug": slug]
+
+        case "setModelPicker":
+            let slug = (params["slug"] as? String) ?? ""
+            let inPicker = (params["inPicker"] as? Bool) ?? true
+            let changed = try service.setCodexModelInPicker(slug: slug, inPicker: inPicker)
+            return ["changed": changed, "slug": slug, "inPicker": inPicker]
+
+        case "removeModel":
+            let slug = (params["slug"] as? String) ?? ""
+            let removed = try service.removeCodexGatewayModel(slug: slug)
+            return ["removed": removed, "slug": slug]
+
+        case "gatewayCheck":
+            let status = service.checkCodexGatewayRouting()
+            return ["healthy": status.healthy, "model": status.model ?? "", "provider": status.provider ?? "",
+                    "exists": status.exists, "summary": status.summary, "configPath": status.configPath]
+
+        case "gatewayRepair":
+            let result = try service.repairCodexGatewayRouting(dryRun: false)
+            return ["changed": result.changed, "backupPath": result.backupPath ?? "",
+                    "summary": result.status.summary, "model": result.status.model ?? "",
+                    "provider": result.status.provider ?? ""]
+
         case "openURL":
             let raw = (params["url"] as? String) ?? ""
             if let url = URL(string: raw), url.scheme == "https" || url.scheme == "http" {

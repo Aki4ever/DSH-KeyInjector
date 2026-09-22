@@ -650,9 +650,8 @@ public final class InjectionEngine {
 
     /// 同步更新 Codex 桌面端的 model_catalog_json 与 model_providers，确保下拉菜单立即可见
     private static func syncCodexModelCatalogIfAvailable(keyRecord: KeyRecord) {
-        let codexDir = PathKit.expand("~/.codex")
-        let configPath = PathKit.expand("~/.codex/config.toml")
-        let catalogPath = PathKit.expand("~/.codex/codex-gateway-models.json")
+        let configPath = KeyInjectorService.defaultCodexConfigPath()
+        let catalogPath = KeyInjectorService.defaultCodexCatalogPath()
         let fm = FileManager.default
         guard fm.fileExists(atPath: configPath) else { return }
 
@@ -744,11 +743,13 @@ refresh_interval_ms = 0
         guard GatewayCatalog.isGatewayModel(model, catalogPath: catalogPath) else { return configText }
 
         let currentProvider = firstAssignmentValue("model_provider", in: configText)
-        if let currentProvider, currentProvider != "codex_gateway" && currentProvider != "openai" {
-            // 用户显式指定了其它第三方 provider，不动
-            return configText
+
+        // 路由正确时也要清掉历史遗留的孤儿标记（Codex 重写会吞掉 END 注释行）
+        if currentProvider == "codex_gateway" {
+            return normalizeManagedBlock(in: configText)
         }
-        if currentProvider == "codex_gateway" && configText.contains(codexDesktopBlockStart) {
+        if let currentProvider, currentProvider != "openai" {
+            // 用户显式指定了其它第三方 provider，不动
             return configText
         }
 
@@ -772,6 +773,49 @@ refresh_interval_ms = 0
         return lines.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
     }
 
+    /// 修复历史遗留的孤儿受管标记。
+    ///
+    /// Codex 桌面端重写 `config.toml` 时会吞掉 `# END CODEX-GATEWAY DESKTOP` 这类注释行，
+    /// 只剩一段没有结束标记的开头注释（实测出现过两个 BEGIN 并存）。
+    /// 判定规则（**结构完整时原样返回，保证幂等**）：
+    ///   · 恰好一个 BEGIN 且其后存在 END → 结构完整，不动
+    ///   · 其余情况 → 每个 BEGIN/END 标记行连同紧随的注释、空行一起删除
+    static func normalizeManagedBlock(in text: String) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let begins = lines.indices.filter { lines[$0].contains(codexDesktopBlockStart) }
+        let ends = lines.indices.filter { lines[$0].contains(codexDesktopBlockEnd) }
+        if begins.count == 1, let begin = begins.first, let finish = ends.first, finish > begin {
+            return text
+        }
+        guard !begins.isEmpty || !ends.isEmpty else { return text }
+        var output: [String] = []
+        var index = 0
+        while index < lines.count {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            if trimmed.contains(codexDesktopBlockStart) || trimmed.contains(codexDesktopBlockEnd) {
+                index += 1
+                while index < lines.count {
+                    let candidate = lines[index].trimmingCharacters(in: .whitespaces)
+                    if candidate.isEmpty || candidate.hasPrefix("#") {
+                        index += 1
+                        continue
+                    }
+                    break
+                }
+                continue
+            }
+            output.append(lines[index])
+            index += 1
+        }
+        var compact: [String] = []
+        for line in output {
+            if line.trimmingCharacters(in: .whitespaces).isEmpty,
+               compact.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { continue }
+            compact.append(line)
+        }
+        return compact.joined(separator: "\n")
+    }
+
     /// 读取 config.toml 里第一个顶层（非注释）`model = "..."` 的取值
     static func firstModelSlug(in configText: String) -> String? {
         firstAssignmentValue("model", in: configText)
@@ -792,13 +836,34 @@ refresh_interval_ms = 0
         return nil
     }
 
+    /// 删除受管区块。**不依赖结束标记**：Codex 桌面端重写 config.toml 时会吞掉
+    /// `# END CODEX-GATEWAY DESKTOP` 这类注释行，若只按结束标记匹配就会留下孤儿标记，
+    /// 导致修复后的配置里出现两个 BEGIN。这里改为「从 BEGIN 行起，向后吃掉紧跟的注释行与空行」。
     static func removeManagedBlock(from text: String) -> String {
-        guard let start = text.range(of: codexDesktopBlockStart),
-              let end = text.range(of: codexDesktopBlockEnd, range: start.upperBound..<text.endIndex) else {
-            return text
-        }
+        guard var start = text.range(of: codexDesktopBlockStart) else { return text }
         var result = text
-        result.removeSubrange(start.lowerBound..<end.upperBound)
+        // 若上方还残留「未闭合 BEGIN + 注释」的孤儿标记，先整体清理掉
+        while let earlier = text.range(of: codexDesktopBlockStart, range: text.startIndex..<start.lowerBound) {
+            start = earlier
+        }
+        var removalEnd = result.index(after: start.upperBound)
+        // 独占一行的 BEGIN 标记本身
+        if let lineEnd = result.range(of: "\n", range: start.upperBound..<result.endIndex) {
+            removalEnd = lineEnd.upperBound
+        }
+        // 继续吞掉紧跟的注释行、空行，以及（若存在）END 标记
+        var cursor = removalEnd
+        while cursor < result.endIndex {
+            let lineEnd = result.range(of: "\n", range: cursor..<result.endIndex)?.upperBound ?? result.endIndex
+            let line = result[cursor..<lineEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("#") || line.isEmpty {
+                removalEnd = lineEnd
+                cursor = lineEnd
+                continue
+            }
+            break
+        }
+        result.removeSubrange(start.lowerBound..<removalEnd)
         return result
     }
 

@@ -6,6 +6,32 @@
 
 ---
 
+## [1.3.0] — 2026-09-22
+
+### 新增
+- **模型清单页（可视化来源）**：新增「模型清单」页面，把 `~/.codex/codex-gateway-models.json` 里的条目逐条列出，
+  标注来源（**公司网关** / **Codex 官方**）、slug、菜单可见性与说明；支持新增网关模型、
+  一键切换「菜单可见 / 隐藏」、删除网关条目（官方条目不可删）。CLI 同步提供
+  `keyinject models list|add|show|hide|rm`。
+  此前这段模型清单只由 codex-gateway 与本工具的注入流程隐式写入，界面里看不到来源，现已全部可视化。
+- **路由常驻守护（launchd 心跳）**：`keyinject gateway install-agent [--interval 10] [--home <CODEX_HOME>]`
+  安装 `com.aki4ever.keyinjector.gateway-guard`，每 10 秒执行一次体检，发现 `model_provider`
+  被桌面端改回官方 provider 就自动修复并写日志（`~/Library/Logs/keyinjector-gateway-guard.log`，
+  仅在真正修复时写行）。`uninstall-agent` 一键卸载。CLI 复制到 `~/.local/bin/keyinject` 作为稳定路径。
+- **模型清单页内置路由体检卡**：红/绿状态 + 「修复路由」按钮，手动兜底。
+
+### 修复
+- **孤儿受管标记清理**：Codex 桌面端重写 `config.toml` 时会吞掉 `# END CODEX-GATEWAY DESKTOP`
+  这类注释行，导致修复后残留 `# BEGIN` / `# END` 孤儿标记（曾实测出现两个 BEGIN）。
+  新增 `normalizeManagedBlock` 按状态机清理孤儿标记，且**路由正确时也会自动收敛**，
+  不再需要人工修配置。
+- **`CODEX_HOME` 支持**：`keyinject gateway check/repair` 与注入时的目录同步现在都会尊重
+  `CODEX_HOME` 环境变量（此前硬编码 `~/.codex`），便于用沙箱目录做隔离验证。
+
+### 变更
+- 守护日志改为自行落盘（`--log`），不再依赖 launchd 的 stdout 重定向（此前因全缓冲导致日志为空）。
+- 回归测试 46 → 48 项（新增孤儿标记清理、模型目录写入）。
+
 ## [1.2.0] — 2026-09-22
 
 ### 修复

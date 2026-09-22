@@ -145,3 +145,37 @@ codex exec -m "ark/DeepSeek-V4.1-Flash" -c 'model_provider="codex_gateway"'
 
 结论：**Antigravity 上游凭据池不稳定 + 额度受限**，与 Codex 配置无关；同一时刻 DeepSeek 线路连续多次 200。
 网关自检 `bin/codex-gateway --json test gemini --protocol responses` 此刻返回 200，但不足以支撑 Codex 单轮多请求的 agent 负载。
+
+
+---
+
+## 模型清单从哪来（v1.3.0 起可视化）
+
+用户疑问：「注入器只写入了公司 AI 综合密钥，并没有细分到模型，这些模型从哪来的？」
+
+答案：Codex 顶部模型菜单的唯一数据源是 `~/.codex/codex-gateway-models.json`（由
+`config.toml` 的 `model_catalog_json` 指向）。该文件里混合了两类条目：
+
+| 来源 | 谁写入 | 例子 |
+| --- | --- | --- |
+| Codex 官方条目 | Codex 自带 `codex debug models --bundled`（本工具不改动） | 6 Astra、5.6 Sol / Terra / Luna |
+| **公司网关条目** | 本工具的注入流程（`syncCodexModelCatalogIfAvailable`）与本机 codex-gateway（`write_model_catalog`） | DeepSeek V4.1（公司网关）、Gemini 3.8 Flash（公司网关） |
+
+也就是说：**网关模型条目确实来自你的 key 注入器**（以及同机的 codex-gateway），只是此前没有界面能看见，
+所以像「凭空多出来的模型」。v1.3.0 起在应用侧边栏新增「模型清单」页，逐条列出
+来源标签、slug、菜单可见性，并可新增 / 隐藏 / 删除；CLI 对应 `keyinject models list|add|show|hide|rm`。
+
+## 常驻守护（自动修复图 1 的故障）
+
+```bash
+keyinject gateway install-agent --interval 10     # 安装（launchd 心跳，每 10 秒体检一次）
+keyinject gateway uninstall-agent                 # 卸载
+tail -f ~/Library/Logs/keyinjector-gateway-guard.log   # 仅在真正修复时写日志
+```
+
+实测（2026-09-22 18:07）：人为删掉真实 `config.toml` 的 `model_provider` 后，**第 8 秒**被守护自动修复，
+日志留下 `已自动修复：ark/DeepSeek-V4.1-Flash → provider=codex_gateway 备份=...`。
+
+## 状态码中文说明
+
+所有状态码（200 / 400 / 401 / 429 / 503 …）的中文口径见 `docs/error-codes.md`。

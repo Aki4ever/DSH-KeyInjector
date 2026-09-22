@@ -784,6 +784,88 @@ struct CodexGatewayRoutingTests {
         #expect(out == text)
     }
 
+    @Test("孤儿 BEGIN 标记（Codex 重写吞掉 END 注释）也能被清理干净")
+    func cleansOrphanBeginMarker() {
+        let text = """
+        model_reasoning_effort = "xhigh"
+        # BEGIN CODEX-GATEWAY DESKTOP
+        # 桌面端换模型时必须同时锁定 provider
+        model = "ark/DeepSeek-V4.1-Flash"
+
+        [marketplaces.openai-bundled]
+        source_type = "local"
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        #expect(out.components(separatedBy: InjectionEngine.codexDesktopBlockStart).count == 2)
+        #expect(out.components(separatedBy: InjectionEngine.codexDesktopBlockEnd).count == 2)
+        #expect(out.contains("model_reasoning_effort = \"xhigh\""))
+        #expect(out.contains("[marketplaces.openai-bundled]"))
+        // 顶层 model 只出现一次
+        let models = out.split(separator: "\n").prefix(while: { !$0.hasPrefix("[") }).filter { $0.hasPrefix("model = ") || $0.hasPrefix("model =") }
+        #expect(models.count == 1)
+    }
+
+    @Test("结构完整的受管区块保持原样（幂等），孤儿标记才清理")
+    func keepsCompleteBlockIntact() {
+        let text = """
+        model_reasoning_effort = "xhigh"
+        # BEGIN CODEX-GATEWAY DESKTOP
+        # 说明注释
+        model = "ark/DeepSeek-V4.1-Flash"
+        model_provider = "codex_gateway"
+        # END CODEX-GATEWAY DESKTOP
+
+        [marketplaces.openai-bundled]
+        source_type = "local"
+        """
+        let out = InjectionEngine.ensureCodexGatewayProviderRouting(text, catalogPath: "/nonexistent.json")
+        // 一个 BEGIN + 一个 END → 结构完整，原样返回（幂等）
+        #expect(out == text)
+        #expect(out.components(separatedBy: InjectionEngine.codexDesktopBlockStart).count == 2)
+        // 再次调用仍不变
+        #expect(InjectionEngine.ensureCodexGatewayProviderRouting(out, catalogPath: "/nonexistent.json") == text)
+    }
+
+    @Test("模型目录：新增/切换/删除网关条目，官方条目不可删")
+    func catalogMutations() throws {
+        let tmp = TempDir()
+        let catalog = tmp.file("catalog.json", content: """
+        {"models": [
+          {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list"},
+          {"slug": "gemini-3.8-flash-high", "display_name": "Gemini 3.8 Flash（公司网关）", "visibility": "list"}
+        ]}
+        """)
+        let path = catalog.path
+
+        // 原始条目识别
+        let before = CodexCatalogStore.load(path: path)
+        #expect(before.count == 2)
+        #expect(before.filter { $0.isGateway }.count == 1)
+        #expect(before.first(where: { $0.slug == "gpt-6-astra" })?.sourceLabel == "Codex 官方")
+
+        // 新增网关条目（模板取现有条目，字段零丢失）
+        let added = try CodexCatalogStore.addGatewayModel(slug: "ark/DeepSeek-V4.1-Flash",
+                                                         displayName: "DeepSeek V4.1（公司网关）",
+                                                         path: path)
+        #expect(added)
+        #expect(try !CodexCatalogStore.addGatewayModel(slug: "ark/DeepSeek-V4.1-Flash", displayName: "重复", path: path))
+        let afterAdd = CodexCatalogStore.load(path: path)
+        #expect(afterAdd.count == 3)
+        #expect(afterAdd.first(where: { $0.slug == "ark/DeepSeek-V4.1-Flash" })?.inPicker == true)
+
+        // 菜单可见性切换
+        #expect(try CodexCatalogStore.setInPicker(slug: "ark/DeepSeek-V4.1-Flash", inPicker: false, path: path))
+        #expect(CodexCatalogStore.load(path: path).first(where: { $0.slug == "ark/DeepSeek-V4.1-Flash" })?.inPicker == false)
+
+        // 官方条目不可删
+        #expect(try !CodexCatalogStore.removeGatewayModel(slug: "gpt-6-astra", path: path))
+        #expect(CodexCatalogStore.load(path: path).count == 3)
+
+        // 网关条目可删
+        #expect(try CodexCatalogStore.removeGatewayModel(slug: "ark/DeepSeek-V4.1-Flash", path: path))
+        #expect(CodexCatalogStore.load(path: path).count == 2)
+    }
+
     @Test("目录内的网关标记条目同样被识别")
     func catalogMarkerDetection() throws {
         let tmp = TempDir()

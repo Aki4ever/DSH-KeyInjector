@@ -1,7 +1,7 @@
 ---
 name: keyinject
 description: AI API Key 管理与配置注入技能包。当用户在 DSH 会话中需要新增/查看/删除大模型 API Key、把密钥注入到 Claude Code / Codex CLI / Shell 启动脚本 / 项目 .env 等第三方工具配置文件、探测密钥是否有效或额度是否耗尽、回滚一次注入、查看操作审计时使用本技能。
-version: 1.2.0
+version: 1.3.0
 ---
 
 # keyinject — AI API Key 管理与配置注入技能
@@ -104,6 +104,26 @@ keyinject gateway repair --yes            # 落盘修复（自动备份 + 写审
 ```
 
 修复只搬动 `model` 与 `model_provider` 两个键，其余顶层设置原样保留；用户显式指定的第三方 provider 不会被覆盖。
+
+常驻守护（自动收敛，避免每次换模型后复发）：
+
+```bash
+keyinject gateway install-agent --interval 10   # launchd 心跳，每 10 秒体检并自动修复
+keyinject gateway uninstall-agent               # 卸载
+```
+
+### 4.8 模型清单（Codex 顶部菜单的来源）
+
+```bash
+keyinject models list            # 只看公司网关条目（含来源标签与菜单可见性）
+keyinject models list --all      # 含 Codex 官方条目
+keyinject models add --slug ark/DeepSeek-V4.1-Flash --name "DeepSeek V4.1（公司网关）" --yes
+keyinject models show|hide --slug <模型名>
+keyinject models rm --slug <模型名>
+```
+
+菜单条目全部来自 `~/.codex/codex-gateway-models.json`：官方条目由 Codex 自带目录生成，
+公司网关条目由本工具注入流程或 codex-gateway 写入。应用内「模型清单」页提供同样的可视化操作。
 
 ## 五、落点选择建议
 

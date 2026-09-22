@@ -29,6 +29,9 @@
       <button class="nav-item" data-page="inject">
         <span class="nav-dot"></span><span>注入中心</span>
       </button>
+      <button class="nav-item" data-page="models">
+        <span class="nav-dot"></span><span>模型清单</span><span class="nav-count" id="count-models"></span>
+      </button>
       <button class="nav-item" data-page="health">
         <span class="nav-dot"></span><span>健康探测</span><span class="nav-count warn" id="count-health"></span>
       </button>
@@ -90,6 +93,24 @@
         <div class="card" id="inject-picker"></div>
         <div id="plan-host"></div>
         <div class="card" id="rollback-host"></div>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-models">
+      <header class="page-head">
+        <div>
+          <h1>模型清单</h1>
+          <p class="sub">Codex 顶部菜单里的模型条目全部来自 <code id="catalog-path">~/.codex/codex-gateway-models.json</code>；这里可视化每一条的来源（公司网关 / Codex 官方），并可增删与切换是否出现在菜单中</p>
+        </div>
+        <div class="head-actions">
+          <label class="switch"><input type="checkbox" id="models-show-all"><span></span>显示官方条目</label>
+          <button class="btn primary" id="btn-model-add">＋ 新增网关模型</button>
+        </div>
+      </header>
+      <div class="scroll">
+        <div class="card" id="route-card"></div>
+        <div class="card" id="models-origin"></div>
+        <div class="card" id="models-host"></div>
       </div>
     </section>
 

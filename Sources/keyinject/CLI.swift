@@ -111,6 +111,13 @@ struct KeyInjectCLI {
       config dump                       导出可编辑的厂商与落点配置模板
       gateway check                     体检 Codex 网关模型是否被正确路由到 codex_gateway
       gateway repair [--yes]            修复路由（默认 dry-run，--yes 才落盘，写入前自动备份）
+      gateway watch [--interval 10]     常驻守护：定期体检并自动修复路由（Ctrl-C 退出）
+      gateway install-agent [--interval 10]   安装 launchd 常驻守护（开机自启，可 uninstall-agent 卸载）
+      gateway uninstall-agent           卸载 launchd 常驻守护
+      models list [--all]               列出模型目录条目（默认只看公司网关模型，含来源与菜单可见性）
+      models add --slug <模型名> --name <菜单显示名> [--desc <说明>] [--hidden] [--yes]
+      models show|hide --slug <模型名>   在 Codex 顶部菜单中显示 / 隐藏该模型
+      models rm --slug <模型名>          从目录删除公司网关模型（官方条目不可删）
 
     通用参数：
       --json                            以 JSON 输出（便于 DSH 会话解析）
@@ -161,6 +168,7 @@ struct KeyInjectCLI {
         case "audit":               runAudit(service, args)
         case "config":              runConfig(service, args)
         case "gateway":             runGateway(service, args)
+        case "models":              runModels(service, args)
         default:
             fail("未知子命令：\(command)（运行 keyinject --help 查看用法）")
         }
@@ -536,6 +544,118 @@ struct KeyInjectCLI {
         } catch { fail("\(error)") }
     }
 
+    // MARK: gateway watch（常驻体检）
+
+    /// 常驻守护：定期体检路由，发现被改回官方 provider 就自动修复。
+    /// 刻意不打印密钥，只打印时间戳、模型、provider 与修复动作。
+    static func runGatewayWatch(_ service: KeyInjectorService, configPath: String?, interval: Double, logPath: String?) {
+        // 刻意不用 print：stdout 被 launchd 重定向时是全缓冲，进程被杀会丢日志
+        emit("守护启动：每 \(Int(interval)) 秒体检一次 Codex 网关路由（Ctrl-C 退出）", to: logPath)
+        var repairs = 0
+        while true {
+            let status = service.checkCodexGatewayRouting(configPath: configPath)
+            if !status.exists {
+                emit("未找到 Codex 配置（\(configPath ?? "~/.codex/config.toml")），跳过本轮", to: logPath)
+            } else if status.healthy {
+                emit("路由正常：model=\(status.model ?? "-") → provider=\(status.provider ?? "-")", to: logPath)
+            }
+            if status.exists, !status.healthy {
+                do {
+                    let result = try service.repairCodexGatewayRouting(configPath: configPath, dryRun: false)
+                    repairs += 1
+                    emit("已自动修复第 \(repairs) 次：model=\(result.status.model ?? "-") → provider=\(result.status.provider ?? "-") 备份=\(result.backupPath ?? "无")", to: logPath)
+                } catch {
+                    emit("修复失败：\(error)", to: logPath)
+                }
+            }
+            Thread.sleep(forTimeInterval: interval)
+        }
+    }
+
+    /// 输出一行日志：给了 --log 就追加到文件（守护模式），否则打到终端
+    static func emit(_ message: String, to logPath: String?) {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let line = "[\(f.string(from: Date()))] \(message)\n"
+        guard let logPath, !logPath.isEmpty else { print(line, terminator: ""); return }
+        let url = URL(fileURLWithPath: PathKit.expand(logPath))
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? line.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    // MARK: models（Codex 模型目录）
+
+    static func runModels(_ service: KeyInjectorService, _ args: Args) {
+        let action = args.rest.first ?? "list"
+        do {
+            switch action {
+            case "list":
+                let includeOfficial = args.flag("all")
+                let entries = service.codexCatalogEntries(includeOfficial: includeOfficial)
+                let overview = service.codexCatalogOverview()
+                if Out.jsonMode {
+                    Out.json([
+                        "ok": true,
+                        "overview": overview,
+                        "models": entries.map { entry in
+                            ["slug": entry.slug, "displayName": entry.displayName, "source": entry.sourceLabel,
+                             "inPicker": entry.inPicker, "description": entry.description]
+                        }
+                    ])
+                    return
+                }
+                Out.box("Codex 模型目录（\(includeOfficial ? "全部" : "公司网关") \(entries.count) 项）")
+                print("目录文件: \(overview["catalogPath"] ?? "")")
+                print("已注册到 config.toml: \((overview["registeredInConfig"] as? Bool ?? false) ? "是" : "否")")
+                print("当前默认模型: \(overview["configModel"] ?? "(未设置)") → provider \(overview["configProvider"] ?? "(未设置)")")
+                print("")
+                for entry in entries {
+                    let mark = entry.inPicker ? "菜单可见" : "已隐藏"
+                    print("• [\(entry.sourceLabel)] \(entry.slug)  — \(entry.displayName)  （\(mark)）")
+                }
+                if !includeOfficial { print("\n提示：加 --all 可查看 Codex 官方条目。") }
+
+            case "add":
+                guard let slug = args.value("slug"), let name = args.value("name") else {
+                    fail("用法：keyinject models add --slug <模型名> --name <菜单显示名> [--desc <说明>] [--hidden] [--yes]")
+                }
+                let inPicker = !args.flag("hidden")
+                if !args.flag("yes") {
+                    Out.box("模型目录写入预览（dry-run）")
+                    print("将新增: \(slug) — \(name)（\(inPicker ? "菜单可见" : "先隐藏")）")
+                    print("目录文件: \(CodexCatalogStore.defaultPath)")
+                    print("确认后加 --yes 落盘。")
+                    return
+                }
+                let added = try service.addCodexGatewayModel(slug: slug, displayName: name,
+                                                             description: args.value("desc") ?? "", inPicker: inPicker)
+                if Out.jsonMode { Out.json(["ok": true, "added": added, "slug": slug]); return }
+                print(added ? "✅ 已新增 \(slug)（重启 Codex 后出现在顶部菜单）" : "ℹ️ 该 slug 已存在，未重复添加：\(slug)")
+
+            case "show", "hide":
+                guard let slug = args.value("slug") else { fail("用法：keyinject models \(action) --slug <模型名>") }
+                let inPicker = (action == "show")
+                let changed = try service.setCodexModelInPicker(slug: slug, inPicker: inPicker)
+                if Out.jsonMode { Out.json(["ok": changed, "slug": slug, "inPicker": inPicker]); return }
+                print(changed ? "✅ 已把 \(slug) 设为「\(inPicker ? "菜单可见" : "隐藏")」（重启 Codex 后生效）" : "❌ 目录中没有该 slug：\(slug)")
+
+            case "rm":
+                guard let slug = args.value("slug") else { fail("用法：keyinject models rm --slug <模型名>") }
+                let removed = try service.removeCodexGatewayModel(slug: slug)
+                if Out.jsonMode { Out.json(["ok": removed, "slug": slug]); return }
+                print(removed ? "✅ 已从目录删除 \(slug)" : "❌ 未删除（不是公司网关条目或不存在）：\(slug)")
+
+            default:
+                fail("用法：keyinject models [list [--all] | add | show | hide | rm]")
+            }
+        } catch { fail("\(error)") }
+    }
+
     // MARK: gateway（Codex 网关路由守护）
 
     static func runGateway(_ service: KeyInjectorService, _ args: Args) {
@@ -558,8 +678,17 @@ struct KeyInjectCLI {
 
         case "repair":
             let dryRun = !args.flag("yes")
+            let quiet = args.flag("quiet")
+            let logPath = args.value("log")
             do {
                 let result = try service.repairCodexGatewayRouting(configPath: configPath, dryRun: dryRun)
+                // 心跳模式下：只在真正修复时写日志，避免每 N 秒刷一行噪音
+                if quiet, !dryRun {
+                    if result.changed {
+                        emit("已自动修复：\(result.status.model ?? "-") → provider=\(result.status.provider ?? "-") 备份=\(result.backupPath ?? "无")", to: logPath)
+                    }
+                    return
+                }
                 if Out.jsonMode {
                     Out.json(["ok": true, "changed": result.changed, "dryRun": result.dryRun,
                               "backupPath": result.backupPath ?? "", "configPath": result.status.configPath,
@@ -580,8 +709,31 @@ struct KeyInjectCLI {
                 }
             } catch { fail("\(error)") }
 
+        case "watch":
+            let interval = Double(args.value("interval") ?? "10") ?? 10
+            runGatewayWatch(service, configPath: configPath, interval: max(2, interval), logPath: args.value("log"))
+
+        case "install-agent":
+            let interval = Int(args.value("interval") ?? "15") ?? 15
+            do {
+                let result = try GatewayGuardAgent.install(intervalSeconds: max(5, interval), codexHome: args.value("home"))
+                if Out.jsonMode { Out.json(["ok": true].merging(result) { _, new in new }); return }
+                Out.box("已安装 launchd 常驻守护")
+                for (key, value) in result.sorted(by: { $0.key < $1.key }) { print("\(key): \(value)") }
+                print("查看日志: \(result["log"] ?? "")")
+                print("卸载: keyinject gateway uninstall-agent")
+            } catch { fail("\(error)") }
+
+        case "uninstall-agent":
+            do {
+                let result = try GatewayGuardAgent.uninstall()
+                if Out.jsonMode { Out.json(["ok": true].merging(result) { _, new in new }); return }
+                Out.box("已卸载 launchd 常驻守护")
+                for (key, value) in result.sorted(by: { $0.key < $1.key }) { print("\(key): \(value)") }
+            } catch { fail("\(error)") }
+
         default:
-            fail("用法：keyinject gateway [check | repair [--yes]] [--config <config.toml 路径>]")
+            fail("用法：keyinject gateway [check | repair [--yes] | watch | install-agent | uninstall-agent] [--config <config.toml 路径>]")
         }
     }
 }
