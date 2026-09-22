@@ -1,0 +1,19 @@
+# ==============================================================================
+# .gitattributes — KeyInjector
+# 统一换行符，避免跨平台协作时出现整文件差异；二进制资产显式声明。
+# ==============================================================================
+
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.swift         text eol=lf
+*.md            text eol=lf
+*.json          text eol=lf
+*.html          text eol=lf
+*.css           text eol=lf
+*.js            text eol=lf
+*.plist         text eol=lf
+
+*.png           binary
+*.icns          binary
+*.dmg           binary

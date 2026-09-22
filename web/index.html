@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Key 注入器</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">K</div>
+      <div class="brand-text">
+        <div class="brand-title">Key 注入器</div>
+        <div class="brand-sub">AI 密钥管理与配置注入</div>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-page="keys">
+        <span class="nav-dot"></span><span>密钥库</span><span class="nav-count" id="count-keys"></span>
+      </button>
+      <button class="nav-item" data-page="inject">
+        <span class="nav-dot"></span><span>注入中心</span>
+      </button>
+      <button class="nav-item" data-page="health">
+        <span class="nav-dot"></span><span>健康探测</span><span class="nav-count warn" id="count-health"></span>
+      </button>
+      <button class="nav-item" data-page="audit">
+        <span class="nav-dot"></span><span>审计日志</span><span class="nav-count" id="count-audit"></span>
+      </button>
+      <button class="nav-item" data-page="settings">
+        <span class="nav-dot"></span><span>设置与说明</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="foot-line" id="foot-backend">密钥后端：—</div>
+      <div class="foot-line dim" id="foot-counts">—</div>
+    </div>
+  </aside>
+
+  <!-- 主区域 -->
+  <main class="main">
+    <div id="banner-host"></div>
+
+    <section class="page" id="page-keys">
+      <header class="page-head">
+        <div>
+          <h1>密钥库</h1>
+          <p class="sub">明文只存在本机密钥后端，配置文件与审计日志中仅出现掩码与指纹</p>
+        </div>
+        <div class="head-actions">
+          <label class="switch"><input type="checkbox" id="reveal-toggle"><span></span>显示明文</label>
+          <button class="btn" id="btn-check-all">全部探测</button>
+          <button class="btn primary" id="btn-add-key">＋ 新增密钥</button>
+        </div>
+      </header>
+      <div id="keys-host" class="scroll"></div>
+    </section>
+
+    <section class="page hidden" id="page-inject">
+      <header class="page-head">
+        <div>
+          <h1>注入中心</h1>
+          <p class="sub">先生成注入计划（dry-run）核对差异，再决定是否写入；写入前自动备份</p>
+        </div>
+        <div class="head-actions">
+          <label class="switch"><input type="checkbox" id="reveal-toggle-inject"><span></span>显示明文</label>
+        </div>
+      </header>
+      <div class="scroll">
+        <div class="card" id="inject-picker"></div>
+        <div id="plan-host"></div>
+        <div class="card" id="rollback-host"></div>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-health">
+      <header class="page-head">
+        <div>
+          <h1>健康探测</h1>
+          <p class="sub">仅在点击时向厂商官方域名发起一次极小的鉴权请求，不做后台轮询</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn primary" id="btn-health-all">全部探测</button>
+        </div>
+      </header>
+      <div class="scroll">
+        <div id="health-stats" class="stats"></div>
+        <div id="health-host" class="card"></div>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-audit">
+      <header class="page-head">
+        <div>
+          <h1>审计日志</h1>
+          <p class="sub">追加写入、永不改写历史；可从此处精确回滚任意一次注入</p>
+        </div>
+        <div class="head-actions">
+          <div class="tabs" id="audit-tabs">
+            <button class="tab active" data-filter="all">全部</button>
+            <button class="tab" data-filter="inject">注入</button>
+            <button class="tab" data-filter="rollback">回滚</button>
+            <button class="tab" data-filter="keys">密钥变更</button>
+            <button class="tab" data-filter="check">探测</button>
+          </div>
+          <button class="btn" id="btn-audit-refresh">刷新</button>
+        </div>
+      </header>
+      <div class="scroll"><div id="audit-host" class="card"></div></div>
+    </section>
+
+    <section class="page hidden" id="page-settings">
+      <header class="page-head">
+        <div><h1>设置与说明</h1><p class="sub">数据位置、安全等级与能力边界</p></div>
+      </header>
+      <div class="scroll">
+        <div class="card" id="settings-info"></div>
+        <div class="card" id="settings-config"></div>
+        <div class="card" id="settings-security"></div>
+        <div class="card" id="settings-cli"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 新增密钥弹窗 -->
+<div class="modal-mask hidden" id="modal-mask">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>新增密钥</h2>
+      <button class="icon-btn" id="modal-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="field"><span>所属厂商</span>
+        <select id="f-provider"></select>
+      </label>
+      <div class="provider-card" id="f-provider-info"></div>
+      <label class="field"><span>别名</span>
+        <input type="text" id="f-label" placeholder="例如：主力 Key / 备用额度包">
+      </label>
+      <label class="field"><span>密钥明文</span>
+        <input type="password" id="f-secret" placeholder="粘贴 API Key（仅保存在本机密钥后端）">
+      </label>
+      <div class="warn-box hidden" id="f-warnings"></div>
+      <label class="field"><span>优先级（数值越小越优先）</span>
+        <input type="number" id="f-priority" value="100" min="0" max="999">
+      </label>
+      <label class="field"><span>标签（逗号分隔）</span>
+        <input type="text" id="f-tags" placeholder="例如：生产,备用">
+      </label>
+      <label class="field"><span>备注</span>
+        <input type="text" id="f-note" placeholder="可选">
+      </label>
+    </div>
+    <div class="modal-foot">
+      <span class="dim small">明文不会写入 vault.json，只保存掩码与指纹</span>
+      <div>
+        <button class="btn" id="modal-cancel">取消</button>
+        <button class="btn primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

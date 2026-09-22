@@ -1,0 +1,143 @@
+[
+  {
+    "authStyle" : "bearer",
+    "baseURL" : "https://api.openai.com/v1",
+    "consoleURL" : "https://platform.openai.com/api-keys",
+    "envKeys" : [
+      "OPENAI_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "healthPath" : "/models",
+    "id" : "openai",
+    "name" : "OpenAI",
+    "note" : "探测使用 GET /v1/models，仅校验鉴权是否通过，不产生推理计费。",
+    "secretPrefixes" : [
+      "sk-"
+    ]
+  },
+  {
+    "authStyle" : "headerKey",
+    "baseURL" : "https://api.anthropic.com/v1",
+    "consoleURL" : "https://console.anthropic.com/settings/keys",
+    "envKeys" : [
+      "ANTHROPIC_API_KEY"
+    ],
+    "extraHeaders" : {
+      "anthropic-version" : "2023-06-01"
+    },
+    "healthPath" : "/models",
+    "id" : "anthropic",
+    "name" : "Anthropic (Claude)",
+    "note" : "Anthropic 使用 x-api-key 头而非 Bearer，本工具已内置该差异。",
+    "secretPrefixes" : [
+      "sk-ant-"
+    ]
+  },
+  {
+    "authStyle" : "bearer",
+    "baseURL" : "https://api.deepseek.com",
+    "consoleURL" : "https://platform.deepseek.com/api_keys",
+    "envKeys" : [
+      "DEEPSEEK_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "healthPath" : "/models",
+    "id" : "deepseek",
+    "name" : "DeepSeek",
+    "note" : "OpenAI 兼容接口，DSH 宿主即读取 DEEPSEEK_API_KEY 环境变量。",
+    "secretPrefixes" : [
+      "sk-"
+    ]
+  },
+  {
+    "authStyle" : "queryKey",
+    "baseURL" : "https://generativelanguage.googleapis.com/v1beta",
+    "consoleURL" : "https://aistudio.google.com/app/apikey",
+    "envKeys" : [
+      "GEMINI_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "healthPath" : "/models",
+    "id" : "google",
+    "name" : "Google Gemini",
+    "note" : "Gemini 走 ?key= 查询参数鉴权，注意避免把含密钥的完整 URL 粘进聊天记录。",
+    "secretPrefixes" : [
+      "AIza"
+    ]
+  },
+  {
+    "authStyle" : "bearer",
+    "baseURL" : "https://openrouter.ai/api/v1",
+    "consoleURL" : "https://openrouter.ai/keys",
+    "envKeys" : [
+      "OPENROUTER_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "healthPath" : "/key",
+    "id" : "openrouter",
+    "name" : "OpenRouter",
+    "note" : "探测 /key 会返回该密钥的额度与限流信息，是判断额度最准的端点。",
+    "secretPrefixes" : [
+      "sk-or-"
+    ]
+  },
+  {
+    "authStyle" : "bearer",
+    "baseURL" : "https://api.moonshot.cn/v1",
+    "consoleURL" : "https://platform.moonshot.cn/console/api-keys",
+    "envKeys" : [
+      "MOONSHOT_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "healthPath" : "/models",
+    "id" : "moonshot",
+    "name" : "Moonshot (Kimi)",
+    "note" : "国内直连，无需代理即可探测。",
+    "secretPrefixes" : [
+      "sk-"
+    ]
+  },
+  {
+    "authStyle" : "bearer",
+    "baseURL" : "https://open.bigmodel.cn/api/paas/v4",
+    "consoleURL" : "https://open.bigmodel.cn/usercenter/apikeys",
+    "envKeys" : [
+      "ZHIPUAI_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "healthPath" : "/models",
+    "id" : "zhipu",
+    "name" : "智谱 GLM",
+    "note" : "密钥形如 `id.secret` 两段式，长度较长，属正常现象。",
+    "secretPrefixes" : [
+
+    ]
+  },
+  {
+    "authStyle" : "bearer",
+    "envKeys" : [
+      "CUSTOM_API_KEY"
+    ],
+    "extraHeaders" : {
+
+    },
+    "id" : "custom",
+    "name" : "自定义 / 兼容网关",
+    "note" : "反例：本项不做任何健康探测与格式预检，请自行确认鉴权方式；自建网关请用环境变量注入。",
+    "secretPrefixes" : [
+
+    ]
+  }
+]
