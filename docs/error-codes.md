@@ -14,7 +14,7 @@
 | **401** | 未授权 | API Key 错误、过期或未被网关接受 | 重新注入密钥；确认网关鉴权头风格（Bearer / x-api-key） |
 | **402** | 需要付费/额度不足 | 上游账号欠费或套餐额度用尽 | 找上游管理员充值或换线路 |
 | **403** | 拒绝访问 | 密钥无该模型权限，或来源 IP 被限制 | 确认密钥权限与网络出口 |
-| **404** | 资源不存在 | 端点路径写错，或自定义 provider 未在 `config.toml` 注册 | 核对 Base URL 末尾是否带 `/v1`，核对 provider 区块 |
+| **404** | 资源不存在 | 端点路径写错；自定义 provider 未在 `config.toml` 注册；**本机实测：Gemini OpenAI 兼容端点 `…/v1beta/openai/models` 在缺少 `Authorization` 头时也会返回 404 `Requested entity was not found.`，把「忘了带鉴权头」伪装成「接口不存在」** | 核对 Base URL 末尾是否带 `/v1`；核对 provider 区块；**再确认 `Authorization: Bearer` 头是否真的发出去了**（详见 `docs/knowledge-account-protocols.md` 第六之二节） |
 | **408** | 请求超时（服务端视角） | 上游处理过慢 | 重试；必要时下调推理档位 |
 | **413** | 请求体过大 | 上下文或工具定义超出上游限制 | 精简会话或换上下文更大的模型 |
 | **422** | 参数语义错误 | 字段类型/取值不合法 | 按返回信息修正字段 |

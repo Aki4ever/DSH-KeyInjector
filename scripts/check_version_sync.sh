@@ -43,11 +43,11 @@ fi
 # ③ 文档与技能包
 check_doc() {
   local file="$1" label="$2"
-  if [ ! -f "$file" ]; then note_fail "$label：文件不存在（$file）"; return; fi
+  if [ ! -f "$file" ]; then note_fail "${label}：文件不存在（$file）"; return; fi
   if grep -q "$VERSION" "$file"; then
-    note_ok "$label：含 $VERSION"
+    note_ok "${label}：含 $VERSION"
   else
-    note_fail "$label：未找到 $VERSION（$file）"
+    note_fail "${label}：未找到 $VERSION（$file）"
   fi
 }
 check_doc "README.md" "③ README"
@@ -57,18 +57,18 @@ check_doc "docs/architecture.md" "③ 架构说明"
 check_doc "CHANGELOG.md" "③ 变更日志"
 
 # ④ 已打包产物（存在才校验）
-APP="dist/Key注入器.app"
+APP="dist/账号管理器.app"
 if [ -d "$APP" ]; then
-  PLIST_VER="$(defaults read "$PROJECT_DIR/$APP/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null)"
+  PLIST_VER="$(plutil -extract CFBundleShortVersionString raw -o - "$PROJECT_DIR/$APP/Contents/Info.plist" 2>/dev/null || true)"
   if [ "$PLIST_VER" = "$VERSION" ]; then
     note_ok "④ 应用包 Info.plist = $PLIST_VER"
   else
     note_fail "④ 应用包版本不一致：Info.plist = '$PLIST_VER'，期望 '$VERSION'（请重新执行 build_app.sh）"
   fi
-  if [ -f "dist/KeyInjector-${VERSION}.dmg" ]; then
-    note_ok "④ 安装镜像 dist/KeyInjector-${VERSION}.dmg 存在"
+  if [ -f "dist/账号管理器-${VERSION}.dmg" ]; then
+    note_ok "④ 安装镜像 dist/账号管理器-${VERSION}.dmg 存在"
   else
-    note_fail "④ 缺少与当前版本匹配的 DMG：dist/KeyInjector-${VERSION}.dmg"
+    note_fail "④ 缺少与当前版本匹配的 DMG：dist/账号管理器-${VERSION}.dmg"
   fi
 else
   echo "  ⏭️  ④ 尚未打包，跳过产物校验（执行 scripts/build_app.sh 后可校验）"
@@ -76,7 +76,7 @@ fi
 
 echo "=========================================================="
 if [ "$FAIL" -eq 0 ]; then
-  echo "✅ 版本一致性门禁通过（版本 $VERSION）"
+  echo "✅ 版本一致性门禁通过（版本 ${VERSION}）"
 else
   echo "❌ 版本一致性门禁失败，请修正上述不一致项"
 fi

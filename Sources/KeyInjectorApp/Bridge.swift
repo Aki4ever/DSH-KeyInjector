@@ -55,6 +55,39 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
             return
         }
+        // 模型发现：真实联网动作，必须显式触发（绝不在启动时自动发起）
+        if method == "discoverKey" {
+            let keyID = (params["id"] as? String) ?? ""
+            runAsync(id: id) { svc in
+                let result = try await svc.discoverModels(forKeyID: keyID)
+                return JSONMapping.discovery(result)
+            }
+            return
+        }
+        if method == "discoverAll" {
+            runAsync(id: id) { svc in
+                let results = try await svc.discoverAllModels()
+                var out: [String: Any] = [:]
+                for (keyID, result) in results { out[keyID] = JSONMapping.discovery(result) }
+                let probed = results.values.filter { $0.probed }.count
+                return ["results": out, "total": results.count, "probed": probed] as [String: Any]
+            }
+            return
+        }
+        // 只读补齐：对没有缓存的 Key 静默执行一次发现（每个 Key 只请求一次）
+        if method == "ensureDiscoveries" {
+            let ids = (params["ids"] as? [String]) ?? []
+            runAsync(id: id) { svc in
+                let keys = try svc.listKeys()
+                var out: [String: Any] = [:]
+                for record in keys where ids.isEmpty || ids.contains(record.id) {
+                    let result = await svc.ensureDiscoveredModels(for: record)
+                    out[record.id] = JSONMapping.discovery(result)
+                }
+                return out
+            }
+            return
+        }
 
         // 同步方法
         do {
@@ -84,7 +117,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
         case "keys":
             let reveal = (params["reveal"] as? Bool) ?? false
-            return try service.listKeys().map { record in
+            // 走 listKeysWithModels：密钥卡需要直接展示「这个 Key 供给了哪些宿主模型」，
+            // 这正是需求「从密钥库里就能看清模型清单」的落点。
+            return try service.listKeysWithModels().map { record in
                 var secret: String? = nil
                 if let cached = secretCache[record.id] {
                     secret = cached
@@ -94,6 +129,43 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
                 return JSONMapping.record(record, secret: secret)
             }
+
+        // 密钥库分区视图：分区标题 = key 别名，一把 key 一个分区（需求 REQ-019）
+        case "keysGrouped":
+            let reveal = (params["reveal"] as? Bool) ?? false
+            let groups = try service.keyGroups().map { group -> KeyInjectorService.KeyGroup in
+                var copy = group
+                copy.records = group.records.map { record -> KeyRecord in
+                    var enriched = record
+                    enriched.modelBindings = service.modelBindings(for: record)
+                    return enriched
+                }
+                return copy
+            }
+            return groups.map { group -> [String: Any] in
+                var json = JSONMapping.keyGroup(group)
+                if reveal, let first = group.records.first, let secret = try? service.secret(for: first.id) {
+                    json["secret"] = secret
+                }
+                return json
+            }
+
+        // 只读读取已缓存的发现结果（不联网）：密钥库首帧据此渲染「可提供模型」
+        case "availableModels":
+            let keys = try service.listKeys()
+            var out: [String: Any] = [:]
+            for record in keys {
+                if let cached = service.cachedDiscovery(for: record) {
+                    out[record.id] = JSONMapping.discovery(cached)
+                }
+            }
+            return out
+
+        // 单把密钥详情（需求 REQ-021）：元数据 + 可用模型 + 落点 + 审计摘要
+        case "keyDetail":
+            let id = (params["id"] as? String) ?? ""
+            let detail = try service.keyDetail(id: id)
+            return JSONMapping.keyDetail(detail)
 
         case "addKey":
             let providerID = (params["providerID"] as? String) ?? ""
@@ -281,6 +353,58 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             ]
 
+        // 跨宿主模型清单：DSH 设置文件 + Codex 网关目录，按归一化身份聚合。
+        // 这是「模型清单并入密钥库」之后的全局总览视图数据源。
+        case "hostModels":
+            let records = service.hostModelRecords()
+            let gateway = service.gatewayConfig()
+            return [
+                "overview": service.hostModelOverview(),
+                // 网关事实源：模型清单与地址的唯一权威（界面据此说明「清单从哪来」）
+                "gateway": [
+                    "sourcePath": gateway.sourcePath,
+                    "baseURL": gateway.baseURL,
+                    "models": gateway.upstreamModels,
+                    "routes": gateway.routes.map { ["route": $0.route, "upstreamModel": $0.upstreamModel] },
+                    "available": gateway.isUsable
+                ],
+                "sync": Bridge.syncPlanJSON(service.planHostConfigSync()),
+                "groups": service.hostModelGroups().map(JSONMapping.modelGroup),
+                "records": records.map(JSONMapping.hostModel),
+                "dshProviders": service.dshProviders().map { provider -> [String: Any] in
+                    [
+                        "id": provider.id,
+                        "displayName": provider.displayName,
+                        "api": provider.api,
+                        "baseURL": provider.baseURL,
+                        "apiKeyEnv": provider.apiKeyEnv,
+                        "enabled": provider.enabled,
+                        "modelIDs": provider.modelIDs
+                    ]
+                }
+            ]
+
+        case "syncPlan":
+            // 只是预览，绝不落盘
+            return Bridge.syncPlanJSON(service.planHostConfigSync())
+
+        case "syncApply":
+            let plan = service.applyHostConfigSync()
+            return Bridge.syncPlanJSON(plan)
+
+        case "switchGatewayModel":
+            let model = (params["model"] as? String) ?? ""
+            let dryRun = (params["dryRun"] as? Bool) ?? true
+            let result = try service.switchCodexGatewayModel(to: model, dryRun: dryRun)
+            return [
+                "changed": result.changed,
+                "dryRun": result.dryRun,
+                "model": model,
+                "provider": result.status.provider ?? "",
+                "backupPath": result.backupPath ?? "",
+                "configPath": result.status.configPath
+            ]
+
         case "addModel":
             let slug = (params["slug"] as? String) ?? ""
             let name = (params["name"] as? String) ?? slug
@@ -336,6 +460,33 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         default:
             throw BridgeError.badRequest("未知方法：\(method)")
         }
+    }
+
+    // MARK: 同步计划 → 前端形状
+
+    /// 把同步计划转成前端可直接渲染的形状
+    static func syncPlanJSON(_ plan: HostConfigSync.Plan) -> [String: Any] {
+        func target(_ result: HostConfigSync.Result) -> [String: Any] {
+            var payload: [String: Any] = [
+                "path": result.targetPath,
+                "changed": result.changed,
+                "dryRun": result.dryRun,
+                "summary": result.summary,
+                "notes": result.notes
+            ]
+            if let failure = result.failure { payload["failure"] = failure }
+            if let backup = result.backupPath { payload["backupPath"] = backup }
+            return payload
+        }
+        return [
+            "gatewayPath": plan.gateway.sourcePath,
+            "gatewayBaseURL": plan.gateway.baseURL,
+            "gatewayModels": plan.gateway.upstreamModels,
+            "anyChanged": plan.anyChanged,
+            "allConsistent": plan.allConsistent,
+            "dsh": target(plan.dsh),
+            "codex": target(plan.codex)
+        ]
     }
 
     // MARK: 异步任务

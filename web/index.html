@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Key 注入器</title>
+<title>账号管理器</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -15,8 +15,8 @@
       <div class="brand-mark">K</div>
       <div class="brand-text">
         <div class="brand-title-row">
-          <span class="brand-title">Key 注入器</span>
-          <span class="brand-version-badge" id="app-version-badge">v1.1.0</span>
+          <span class="brand-title">账号管理器</span>
+          <span class="brand-version-badge" id="app-version-badge">v1.6.0</span>
         </div>
         <div class="brand-sub">AI 密钥管理与配置注入</div>
       </div>
@@ -24,13 +24,10 @@
 
     <nav class="nav" id="nav">
       <button class="nav-item active" data-page="keys">
-        <span class="nav-dot"></span><span>密钥库</span><span class="nav-count" id="count-keys"></span>
+        <span class="nav-dot"></span><span>密钥</span><span class="nav-count" id="count-keys"></span>
       </button>
       <button class="nav-item" data-page="inject">
         <span class="nav-dot"></span><span>注入中心</span>
-      </button>
-      <button class="nav-item" data-page="models">
-        <span class="nav-dot"></span><span>模型清单</span><span class="nav-count" id="count-models"></span>
       </button>
       <button class="nav-item" data-page="health">
         <span class="nav-dot"></span><span>健康探测</span><span class="nav-count warn" id="count-health"></span>
@@ -56,16 +53,45 @@
     <section class="page" id="page-keys">
       <header class="page-head">
         <div>
-          <h1>密钥库</h1>
-          <p class="sub">明文只存在本机密钥后端，配置文件与审计日志中仅出现掩码与指纹</p>
+          <h1>密钥</h1>
+          <p class="sub">一把 Key 一个分区：身份、模型清单（名称 / 更新时间）、账号额度同屏呈现。明文只存在本机密钥后端，配置文件与审计日志中仅出现掩码与指纹</p>
         </div>
         <div class="head-actions">
-          <span class="version-pill" id="global-version-pill"><span class="pulse-dot"></span>v1.1.0 已就绪</span>
+          <span class="version-pill" id="global-version-pill"><span class="pulse-dot"></span>v2.0.0 已就绪</span>
           <label class="switch"><input type="checkbox" id="reveal-toggle"><span></span>显示明文</label>
+          <button class="btn" id="btn-discover-all" title="对每把密钥探测其端点 /models，识别它能提供哪些模型">🔍 全部探测模型</button>
           <button class="btn" id="btn-check-all">全部探测</button>
           <button class="btn primary" id="btn-add-key">＋ 新增密钥</button>
         </div>
       </header>
+      <div class="keys-toolbar">
+        <div class="keys-search">
+          <span class="keys-search-icon">🔎</span>
+          <input type="text" id="keys-search" placeholder="搜索密钥名称 / 厂商 / 模型名 / 端点">
+          <button class="icon-btn hidden" id="keys-search-clear" title="清除">✕</button>
+        </div>
+        <div class="keys-toolbar-right">
+          <label class="mini-check"><input type="checkbox" id="keys-filter-attention"><span>仅看未探测 / 异常</span></label>
+          <button class="btn small" id="btn-groups-toggle" title="折叠或展开全部分区">⇕ 全部折叠</button>
+        </div>
+      </div>
+
+      <!-- 跨宿主模型总览：与密钥库同页（格式塔：共同区域 + 邻接）
+           默认折叠（闭合性），需要看全局模型时才展开，避免抢走密钥列表的注意力 -->
+      <details class="overview-fold" id="keys-overview">
+        <summary>
+          <span class="of-title">跨宿主模型总览</span>
+          <span class="of-sub" id="overview-summary">DSH 与 Codex 的模型声明、网关事实源与同步计划</span>
+        </summary>
+        <div class="of-body">
+          <div class="card" id="route-card"></div>
+          <div class="card" id="models-origin"></div>
+          <div class="card" id="models-gateway"></div>
+          <div id="models-host"></div>
+          <div class="card admin-zone" id="models-admin-host"></div>
+        </div>
+      </details>
+
       <div id="keys-host" class="scroll"></div>
     </section>
 
@@ -93,24 +119,6 @@
         <div class="card" id="inject-picker"></div>
         <div id="plan-host"></div>
         <div class="card" id="rollback-host"></div>
-      </div>
-    </section>
-
-    <section class="page hidden" id="page-models">
-      <header class="page-head">
-        <div>
-          <h1>模型清单</h1>
-          <p class="sub">Codex 顶部菜单里的模型条目全部来自 <code id="catalog-path">~/.codex/codex-gateway-models.json</code>；这里可视化每一条的来源（公司网关 / Codex 官方），并可增删与切换是否出现在菜单中</p>
-        </div>
-        <div class="head-actions">
-          <label class="switch"><input type="checkbox" id="models-show-all"><span></span>显示官方条目</label>
-          <button class="btn primary" id="btn-model-add">＋ 新增网关模型</button>
-        </div>
-      </header>
-      <div class="scroll">
-        <div class="card" id="route-card"></div>
-        <div class="card" id="models-origin"></div>
-        <div class="card" id="models-host"></div>
       </div>
     </section>
 
@@ -170,7 +178,7 @@
     <div class="modal-head">
       <div style="display:flex;align-items:center;gap:8px;">
         <h2 id="modal-title">新增密钥</h2>
-        <span class="brand-version-badge" id="modal-version-tag">v1.1.0</span>
+        <span class="brand-version-badge" id="modal-version-tag">v1.6.0</span>
       </div>
       <button class="icon-btn" id="modal-close">✕</button>
     </div>
@@ -271,6 +279,29 @@
   </div>
 </div>
 
+<!-- 密钥详情弹窗（需求：点进 key 进去可以查看详情） -->
+<div class="modal-mask hidden" id="detail-mask">
+  <div class="modal modal-detail">
+    <div class="modal-head">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <h2 id="detail-title">密钥详情</h2>
+        <span class="chip plain" id="detail-provider">—</span>
+      </div>
+      <button class="icon-btn" id="detail-close" title="关闭（Esc）">✕</button>
+    </div>
+    <div class="modal-body" id="detail-body"></div>
+    <div class="modal-foot">
+      <span class="dim small" id="detail-foot">模型清单只读取自该 Key 端点与宿主声明，本工具不改写宿主配置</span>
+      <div>
+        <button class="btn" id="detail-health">🩺 改为探测鉴权</button>
+        <button class="btn primary" id="detail-probe">🔍 重新探测模型</button>
+        <button class="btn" id="detail-close-2">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
+
 </body>
 </html>

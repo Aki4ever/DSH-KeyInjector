@@ -8,10 +8,10 @@
 
 public enum AppVersion {
     /// 当前实施版本，必须与仓库根目录 VERSION 文件内容一致
-    public static let current = "1.3.0"
+    public static let current = "2.0.0"
 
-    /// 产品名
-    public static let productName = "KeyInjector"
+    /// 产品名（面向用户的显示名；内部包名 / 可执行名 / CLI 命令保持 KeyInjector 时代的兼容值）
+    public static let productName = "账号管理器"
 
     /// 人类可读的完整版本描述
     public static var display: String { "\(productName) v\(current)" }

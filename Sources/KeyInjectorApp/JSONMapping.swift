@@ -77,6 +77,51 @@ enum JSONMapping {
         ]
     }
 
+    /// 一条「密钥 → 模型」供给绑定的 JSON 形态（不含任何明文）
+    static func binding(_ b: HostModelInventory.Binding) -> [String: Any] {
+        [
+            "modelID": b.modelID,
+            "displayName": b.displayName,
+            "host": b.host.rawValue,
+            "hostLabel": b.host.label,
+            "owner": b.owner,
+            "inMenu": b.inMenu,
+            "credentialKey": b.credentialKey,
+            "endpoint": b.endpoint,
+            "matchedBy": b.matchedBy
+        ]
+    }
+
+    /// 跨宿主统一模型条目的 JSON 形态
+    static func hostModel(_ m: HostModelRecord) -> [String: Any] {
+        [
+            "id": m.id,
+            "normalizedID": m.normalizedID,
+            "displayName": m.displayName,
+            "host": m.host.rawValue,
+            "hostLabel": m.hostLabel,
+            "owner": m.owner,
+            "credentialKey": m.credentialKey,
+            "endpoint": m.endpoint,
+            "note": m.note,
+            "inMenu": m.inMenu,
+            "isGateway": m.isGateway,
+            "sourcePath": m.sourcePath
+        ]
+    }
+
+    /// 按归一化身份聚合后的模型分组
+    static func modelGroup(_ g: HostModelInventory.Group) -> [String: Any] {
+        [
+            "normalizedID": g.normalizedID,
+            "displayName": g.displayName,
+            "aliases": g.aliases,
+            "hosts": g.hosts.map { ["id": $0.rawValue, "label": $0.label] },
+            "isGateway": g.isGateway,
+            "records": g.records.map(hostModel)
+        ]
+    }
+
     static func record(_ r: KeyRecord, secret: String?) -> [String: Any] {
         var out: [String: Any] = [
             "id": r.id,
@@ -91,9 +136,80 @@ enum JSONMapping {
             "baseURL": r.baseURL ?? "",
             "createdAt": ISO8601DateFormatter().string(from: r.createdAt),
             "updatedAt": ISO8601DateFormatter().string(from: r.updatedAt),
-            "lastCheck": check(r.lastCheck)
+            "lastCheck": check(r.lastCheck),
+            "modelBindings": r.modelBindings.map(binding)
         ]
         if let secret { out["secret"] = secret }
+        return out
+    }
+
+    /// 一条「这把 Key 可提供」的模型（含取证来源与置信度）
+    static func availableModel(_ m: AvailableModel) -> [String: Any] {
+        var out: [String: Any] = [
+            "modelID": m.modelID,
+            "displayName": m.displayName,
+            "source": m.source.rawValue,
+            "sourceLabel": m.source.label,
+            "confidence": m.source.confidence,
+            "evidence": m.evidence,
+            "owner": m.owner,
+            "inMenu": m.inMenu,
+            "credentialKey": m.credentialKey,
+            "endpoint": m.endpoint
+        ]
+        out["host"] = m.host?.rawValue ?? ""
+        out["hostLabel"] = m.host?.label ?? ""
+        return out
+    }
+
+    /// 一次模型发现的完整结果（含降级原因，界面据此如实告知用户）
+    static func discovery(_ d: ModelDiscoveryResult) -> [String: Any] {
+        let models = d.normalizedModels
+        var bySource: [String: Int] = [:]
+        for m in models { bySource[m.source.rawValue, default: 0] += 1 }
+        return [
+            "probed": d.probed,
+            "endpoint": d.endpoint,
+            "note": d.note,
+            "httpStatus": d.httpStatus,
+            "fetchedAt": ISO8601DateFormatter().string(from: d.fetchedAt),
+            "fingerprint": d.fingerprint,
+            "sourceLabel": d.sourceLabel,
+            "modelCount": d.modelCount,
+            "sourceCounts": bySource,
+            "models": models.map(availableModel)
+        ]
+    }
+
+    static func keyGroup(_ g: KeyInjectorService.KeyGroup) -> [String: Any] {
+        [
+            "label": g.label,
+            "modelCount": g.modelCount,
+            "keys": g.records.map { record($0, secret: nil) }
+        ]
+    }
+
+    static func injectedLocation(_ l: KeyInjectorService.InjectedLocation) -> [String: Any] {
+        [
+            "targetID": l.targetID,
+            "targetName": l.targetName,
+            "filePath": l.filePath,
+            "itemKey": l.itemKey,
+            "lastInjectedAt": ISO8601DateFormatter().string(from: l.lastInjectedAt)
+        ]
+    }
+
+    /// 密钥详情：元数据 + 可用模型 + 宿主绑定 + 落点 + 审计摘要
+    static func keyDetail(_ d: KeyInjectorService.KeyDetail) -> [String: Any] {
+        var out: [String: Any] = [
+            "record": record(d.record, secret: nil),
+            "availableModels": d.availableModels.map(availableModel),
+            "bindings": d.bindings.map(binding),
+            "locations": d.locations.map(injectedLocation),
+            "audit": d.auditEntries.map(audit),
+            "probeable": d.probeable
+        ]
+        out["discovery"] = d.discovery.map(discovery) ?? NSNull()
         return out
     }
 
@@ -133,6 +249,7 @@ enum JSONMapping {
             "writesFile": p.target.format.writesFile,
             "blocked": p.blocked,
             "warnings": p.warnings,
+            "suppliedModels": p.suppliedModels.map(binding),
             "diff": diff.map { ["kind": $0.kind.rawValue, "text": $0.text] },
             "snippet": reveal ? p.snippet : p.redactedSnippet(secret: secret)
         ]

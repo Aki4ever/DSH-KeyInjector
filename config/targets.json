@@ -4,7 +4,7 @@
     "format" : "yaml",
     "id" : "dsh-desktop",
     "isCustom" : false,
-    "itemKey" : "DEEPSEEK_API_KEY",
+    "itemKey" : "MIDPRO_API_KEY",
     "jsonPath" : [
 
     ],

@@ -46,9 +46,10 @@
 
     },
     "healthPath" : "/models",
+    "balancePath" : "/user/balance",
     "id" : "deepseek",
     "name" : "DeepSeek",
-    "note" : "OpenAI 兼容接口，DSH 宿主即读取 DEEPSEEK_API_KEY 环境变量。",
+    "note" : "OpenAI 兼容接口，DSH 宿主即读取 DEEPSEEK_API_KEY 环境变量。三家实测中唯一提供余额接口的厂商：GET /user/balance 返回 is_available 与分币种余额；模型清单不含时间字段。",
     "secretPrefixes" : [
       "sk-"
     ]
@@ -66,7 +67,7 @@
     "healthPath" : "/models",
     "id" : "google",
     "name" : "Google Gemini",
-    "note" : "Gemini 走 ?key= 或 Bearer 鉴权，支持 Google AI Studio (AIza) 及 Cloud/中转凭证 (AQ.)。",
+    "note" : "Gemini 走 ?key= 或 Bearer 鉴权，支持 Google AI Studio (AIza) 及 Cloud/中转凭证 (AQ.)。官方公开协议无余额端点：额度维度如实标注「该协议不提供」，429 时按「配额耗尽」处理。",
     "secretPrefixes" : [
       "AIza",
       "AQ."

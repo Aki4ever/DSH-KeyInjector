@@ -8,11 +8,15 @@ import Foundation
 /// ChatGPT 后端会直接返回
 /// “The '<model>' model is not supported when using Codex with a ChatGPT account.”
 public enum GatewayCatalog {
-    /// 已知的公司网关模型 slug（双保险：即使目录缺失也能识别）
-    public static let knownGatewaySlugs: Set<String> = [
-        "ark/DeepSeek-V4.1-Flash",
-        "gemini-3.8-flash-high"
-    ]
+    /// 公司网关模型 slug —— **不再硬编码**。
+    ///
+    /// v1.4.0 之前这里写死两个 slug，网关一加模型就得改代码，是明确的维护负担。
+    /// 现在唯一事实源是网关自己的配置（`~/.config/codex-gateway/config.json` 的
+    /// `models` 路由表）。读不到网关配置时回退为空集合，由目录标记词与
+    /// `model_provider` 归属继续兜底判定，不会把网关模型误判成官方模型。
+    public static var knownGatewaySlugs: Set<String> {
+        Set(GatewayConfig.declaredModels())
+    }
 
     /// 网关模型在目录里的标记词（本工具与 codex-gateway 生成条目时都会带上）
     public static let gatewayMarkers = ["网关", "gateway"]

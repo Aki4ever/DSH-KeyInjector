@@ -1,7 +1,7 @@
 ---
 name: keyinject
 description: AI API Key 管理与配置注入技能包。当用户在 DSH 会话中需要新增/查看/删除大模型 API Key、把密钥注入到 Claude Code / Codex CLI / Shell 启动脚本 / 项目 .env 等第三方工具配置文件、探测密钥是否有效或额度是否耗尽、回滚一次注入、查看操作审计时使用本技能。
-version: 1.3.0
+version: 2.0.0
 ---
 
 # keyinject — AI API Key 管理与配置注入技能
@@ -33,7 +33,7 @@ version: 1.3.0
 .build/release/keyinject        # 发布版
 
 # 已安装的应用包内自带
-/Applications/Key注入器.app/Contents/Resources/bin/keyinject
+/Applications/账号管理器.app/Contents/Resources/bin/keyinject
 ```
 
 ## 四、标准操作流程
@@ -112,7 +112,47 @@ keyinject gateway install-agent --interval 10   # launchd 心跳，每 10 秒体
 keyinject gateway uninstall-agent               # 卸载
 ```
 
-### 4.8 模型清单（Codex 顶部菜单的来源）
+### 4.8 模型清单（两个宿主顶部菜单的来源）
+
+```bash
+keyinject hosts list             # 跨宿主总览：DSH + Codex 的模型，同一模型别名自动合并
+keyinject hosts keys             # 每个密钥供给了哪些模型（凭据键名 / 端点两种依据）
+keyinject keys                   # 密钥列表，同时显示各自供给的模型
+keyinject sync                   # 把网关清单补齐到两个客户端（dry-run，不落盘）
+keyinject sync --yes             # 确认后落盘（每个目标写入前自动备份）
+keyinject sync --prune --yes     # 以网关为准对齐，会删除网关未声明的模型（慎用）
+```
+
+**单一事实源是网关自己的配置** `~/.config/codex-gateway/config.json`
+（`CODEX_GATEWAY_HOME` 可覆盖），里面就写着 `base_url` 与线路表
+（`deepseek → ark/DeepSeek-V4.1-Flash` 这类）。工具里**不存任何模型名单**，
+所以网关加模型后不需要改代码、也不需要重新构建。
+
+两个客户端各自的落点不同，但清单同源：
+
+| 宿主 | 数据源 | 凭据如何关联 |
+| :--- | :--- | :--- |
+| DSH 桌面端 | `<DSH 数据目录>/harness/settings.yaml` 的 `llm-pi-ai.providers.*.models` | 同处 `apiKeyEnv` 声明的键名 → `.credentials.yaml` 的 `refs` 区块 |
+| Codex 桌面端 | `~/.codex/codex-gateway-models.json`（`config.toml` 的 `model_catalog_json` 指向） | `[model_providers.codex_gateway].base_url` → 指向同一台网关的密钥 |
+
+因此 DSH 的 `DS/DeepSeek V4.1 Flash` 与 Codex 的 `ark/DeepSeek-V4.1-Flash` 是同一个模型的
+两个别名；`hosts list` 会把它们合成一条。
+
+**同步的安全边界**：`sync` 默认**只增不减**——网关没声明的模型不会被删掉，因为那些可能是
+你手动加的在用模型（本机就有 3 个这种情况）。需要完全对齐时才加 `--prune`。
+注入器对 `settings.yaml` 只动 `models:` 这一个列表，其余字段（onboarding、权限等）原样不动。
+
+换 Codex 当前使用的模型：
+
+```bash
+keyinject gateway switch --model gemini-3.8-flash-high          # 预览将改动的两行
+keyinject gateway switch --model gemini-3.8-flash-high --yes    # 落盘（自动备份）
+```
+
+只改写 `model` 与 `model_provider` 两个键，其余（`model_catalog_json`、审批策略等）逐字保留；
+完全退出并重新打开 Codex 后生效。
+
+Codex 侧条目的写入操作：
 
 ```bash
 keyinject models list            # 只看公司网关条目（含来源标签与菜单可见性）
@@ -122,8 +162,53 @@ keyinject models show|hide --slug <模型名>
 keyinject models rm --slug <模型名>
 ```
 
-菜单条目全部来自 `~/.codex/codex-gateway-models.json`：官方条目由 Codex 自带目录生成，
-公司网关条目由本工具注入流程或 codex-gateway 写入。应用内「模型清单」页提供同样的可视化操作。
+应用内「密钥」页每张密钥卡内嵌「可提供模型」区块；跨宿主模型总览（清单来源 / 网关事实源 / 条目明细 / Codex 目录管理）已并入**同一页顶部的可折叠区**（v2.0.0 起不再有独立的「模型清单」页）。
+
+> 应用显示名自 v2.0.0 起为 **账号管理器**（旧名「Key 注入器」）。内部标识符未变：
+> Swift 包名 `KeyInjector`、CLI 命令 `keyinject`、环境变量 `KEYINJECTOR_HOME`、数据目录
+> `~/Library/Application Support/KeyInjector/` 全部照旧，既有脚本无需改动。
+
+### 4.9 密钥本身能提供哪些模型（v1.6.0 起，按需联网；v2.0.0 起含三维度）
+
+密钥页按 key 别名分区；每把 key 可以先「识别模型」，即实测它自己端点的 `/models`：
+
+```bash
+keyinject keys --grouped                          # 按 key 别名分区输出，含每把 key 的模型摘要与更新时间
+keyinject models probe --id <keyID>               # 实测这把 key 的端点，输出模型、来源与额度
+keyinject models probe --all                      # 逐把实测
+keyinject key show --id <keyID>                   # 一把 key 的完整详情（元数据 + 模型 + 落点 + 审计）
+keyinject key show --id <keyID> --probe           # 顺带重新实测一次再输出
+```
+
+**三维度（模型名称 / 剩余额度 / 更新日期）的可得性**——依据官方协议调研，见 `docs/knowledge-account-protocols.md`：
+
+| 维度 | 谁能给 | 命令输出 |
+| :--- | :--- | :--- |
+| 模型名称 | 三家都给 | 每条模型一行 |
+| 更新时间 | **仅 OpenAI 形状**（`created`，另有 `shutdown_date` 下线公告） | `publishedAt` / `shutdownDate`；协议没给的**不输出**（界面显示「该协议不提供」） |
+| 剩余额度 | **仅 DeepSeek**（`GET /user/balance`） | `balance` 块（`available` + 分币种 `entries`，金额字符串原样） |
+
+> 两条不能踩的线：① Gemini 的 `version`（如 `001`）是**版本序号不是日期**，输出为 `versionTag`；
+> ② 非 DeepSeek 厂商**不发起余额请求**，`balance` 为 `null` 而不是 0，界面显示「该协议不提供」。
+
+**来源层级与可信度**（输出里逐条标注，切勿把低可信度当事实）：
+
+| 层级 | 来源 | 含义 |
+| :--- | :--- | :--- |
+| T1–T3 | 端点探测 | 该 Key 自己的端点 `/models` 实测返回，最可信 |
+| T4 | 宿主映射 | DSH/Codex 配置里声明的绑定（凭据键名 + 端点同源），可信但可能过时 |
+| T5 | 推断 | 仅名称/供应商相似度的候选，**可能出错**，只能作为提示 |
+
+**联网边界**：识别是**显式动作**，不做后台轮询；结果缓存在 `model-cache.json`
+（只含掩码、指纹、模型名、端点与时间，不含明文）。打开界面只读缓存、不联网。
+
+**已知陷阱**：不要仅凭「落点键名同名」就断定某把 Key 供给某批模型。
+实测踩坑——Gemini Key 曾因 DSH 落点键名与网关供应商 `apiKeyEnv` 同名而被误判成
+「供给公司网关 5 个模型」，而它连的是 `generativelanguage.googleapis.com`。
+现在必须端点同源才会绑定；报告结论时也应说明依据，而不要只说数量。
+
+> DSH 落点的键名以宿主声明为权威：`settings.yaml` 里 `apiKeyEnv` 写什么，注入就写什么。
+> 落点目录中的 `itemKey` 只在该落点没有可识别的宿主声明时作为回退值。
 
 ## 五、落点选择建议
 

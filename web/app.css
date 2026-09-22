@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Key 注入器 · 界面样式
+   账号管理器 · 界面样式
    设计要点：系统字体栈、卡片化信息层级、自适应浅色/深色、等宽字体展示密钥与差异
    ========================================================================== */
 
@@ -537,3 +537,270 @@ select:focus, input:focus {
 .empty .big { font-size: 26px; opacity: .4; margin-bottom: 8px; }
 
 .pill-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ==========================================================================
+   模型供给区块（密钥卡内）与跨宿主模型总览
+   --------------------------------------------------------------------------
+   格式塔落地要点的样式对应：
+     · 共同区域：`.key-models` 用左侧强调线与浅底把自己围成一个区域，
+       明确「这些模型属于上面那张密钥卡」，而不是游离的全局列表；
+     · 接近性：该区块与端点/指纹行的间距（6px）小于卡片之间的间距（10px），
+       因此视觉上先归到同一张卡，再与相邻卡片区分；
+     · 相似性：复用 .chip / .status 既有样式与色点，不新增配色体系；
+     · 图形—背景：次级字号 11.5px + 弱色，让密钥本身保持主视觉；
+     · 闭合性：默认折叠一行摘要，展开后信息成组闭合，不会无限拉长卡片。
+   ========================================================================== */
+
+.key-models {
+  margin-top: 6px;
+  border-left: 2px solid var(--accent-soft);
+  background: var(--panel-2);
+  border-radius: 0 8px 8px 0;
+  padding: 6px 10px;
+}
+.key-models.empty-note {
+  display: flex; align-items: center; gap: 8px;
+  border-left-color: var(--line);
+  color: var(--text-dim);
+}
+.key-models .km-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--text); font: inherit; text-align: left;
+}
+.key-models .km-head:hover { color: var(--accent); }
+.key-models .km-caret { font-size: 10px; color: var(--text-dim); width: 10px; flex: 0 0 10px; }
+.key-models .km-title { font-size: 11.5px; font-weight: 600; }
+.key-models .km-body { margin-top: 6px; }
+.km-host { margin-bottom: 6px; }
+.km-host:last-of-type { margin-bottom: 2px; }
+.km-host-name { font-size: 11px; font-weight: 600; color: var(--text-dim); margin-bottom: 3px; }
+.km-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 3px 0 3px 10px; font-size: 11.5px;
+}
+.km-row .status { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+.km-model-id {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--line); padding: 1px 5px; border-radius: 5px;
+}
+.km-foot { border-top: 1px solid var(--line); padding-top: 5px; margin-top: 6px; line-height: 1.6; }
+
+/* ---------- 跨宿主模型总览（模型清单页主体） ---------- */
+
+.model-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 11px 14px; margin-bottom: 10px;
+}
+.model-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.model-name { font-weight: 650; font-size: 13px; }
+.model-aliases { margin-top: 7px; }
+.model-alias-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 4px 0 4px 10px; font-size: 11.5px;
+  border-bottom: 1px dashed var(--line);
+}
+.model-alias-row:last-child { border-bottom: 0; }
+.model-alias-row .status { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+.model-card-foot { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--line); }
+
+/* ---------- 写入管理区（与只读清单明确分区，避免误触） ---------- */
+
+.admin-zone { border-style: dashed; }
+.admin-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.admin-head h2 { margin: 0; }
+.admin-actions { display: flex; gap: 6px; }
+
+/* 总览页头部按钮：定宽避免中文被逐字换行成竖排（实测 "回到密钥库" 会变成 4 行） */
+#btn-models-goto-keys { white-space: nowrap; flex-shrink: 0; }
+
+/* ==========================================================================
+   网关事实源与同步卡
+   格式塔落点：
+   · 相似性——复用既有 chip / status 点与 .small 字号，不引入新视觉语言；
+   · 共同区域——网关路由行用统一左对齐列排布，一眼看出「线路 → 上游模型」的配对；
+   · 图形—背景——同步报告用次级底色压在卡片内，与上方来源说明分层。
+   ========================================================================== */
+.gw-routes { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; }
+.gw-route { display: flex; align-items: baseline; gap: 8px; }
+.gw-route .chip { flex-shrink: 0; }
+/* 长模型名允许在自身内部折行，但不许把「→」挤到单独一行 */
+.gw-route .km-model-id { min-width: 0; overflow-wrap: anywhere; }
+
+.sync-report {
+  margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(127, 127, 127, .07);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.sync-target { display: flex; flex-direction: column; gap: 3px; }
+.sync-name { font-size: 12px; font-weight: 600; }
+.sync-note { padding-left: 2px; }
+
+.btn.tiny { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
+.model-alias-row .btn.tiny { margin-left: auto; flex-shrink: 0; }
+
+/* ==========================================================================
+   密钥库「名字分区」与「模型识别」（REQ-019 / REQ-020 / REQ-021）
+   格式塔取舍：
+     · 共同区域：每个分区用一条左边框包住「标题 + 该 Key 的模型」，先归组再区分；
+     · 接近性：分区内间距 8px < 分区之间 18px，让「同一把 Key 的资料」聚在一起；
+     · 相似性：来源标签复用既有 .chip 体系，只用颜色区分置信度，不新增视觉语言；
+     · 图形—背景：分区标题用主字号 + 500 字重，模型行为次级字号与弱色。
+   ========================================================================== */
+
+.keys-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 0 20px 10px; flex-shrink: 0;
+}
+.keys-search {
+  position: relative; display: flex; align-items: center;
+  flex: 1; min-width: 200px; max-width: 420px;
+}
+.keys-search-icon {
+  position: absolute; left: 9px; font-size: 11px; opacity: .6; pointer-events: none;
+}
+.keys-search input {
+  width: 100%; padding: 6px 26px 6px 26px; font-size: 12px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+}
+.keys-search input:focus { outline: none; border-color: var(--accent); }
+.keys-search .icon-btn { position: absolute; right: 4px; }
+.keys-toolbar-right { display: flex; align-items: center; gap: 10px; }
+.mini-check {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--text-dim); cursor: pointer; user-select: none;
+}
+
+.key-group {
+  border-left: 2px solid var(--accent-soft);
+  padding-left: 12px; margin-bottom: 18px;
+}
+.key-group:last-child { margin-bottom: 4px; }
+.key-group-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 2px 0 8px; cursor: pointer; user-select: none;
+}
+.key-group-head:hover .key-group-name { color: var(--accent); }
+.key-group-caret { font-size: 10px; color: var(--text-dim); width: 10px; }
+.key-group-name { font-size: 13.5px; font-weight: 650; letter-spacing: -0.1px; }
+.key-group-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.key-group-body.collapsed { display: none; }
+.key-group-body .key-card { margin-bottom: 8px; }
+
+/* 来源与置信度标签：复用 .chip 形状，只换语义色 */
+.chip.src-probe { background: rgba(26, 158, 92, .14); color: var(--green); }
+.chip.src-hostMapped { background: var(--accent-soft); color: var(--accent); }
+.chip.src-inferred { background: rgba(196, 127, 26, .16); color: var(--orange); }
+.chip.src-unknown { background: var(--line); color: var(--text-dim); }
+
+.discovery-line {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-dim); margin-top: 3px;
+}
+
+/* ---------- 密钥详情弹窗 ---------- */
+
+.modal.modal-detail { width: min(880px, 94vw); max-height: 88vh; }
+.modal-detail .modal-body { display: flex; flex-direction: column; gap: 14px; }
+.detail-section {
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); padding: 12px 14px;
+}
+.detail-section > h3 {
+  margin: 0 0 8px; font-size: 12.5px; font-weight: 650;
+  display: flex; align-items: center; gap: 8px;
+}
+.detail-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 4px 16px;
+}
+.detail-kv { display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; padding: 2px 0; }
+.detail-kv .k { flex: 0 0 76px; color: var(--text-dim); }
+.detail-kv .v { flex: 1; min-width: 0; word-break: break-all; }
+.detail-model-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 2px; border-bottom: 1px solid var(--line);
+}
+.detail-model-row:last-child { border-bottom: 0; }
+.detail-model-row .km-model-id { flex: 0 1 auto; }
+.detail-model-row .evidence { font-size: 10.5px; color: var(--text-dim); }
+.detail-empty { font-size: 11.5px; color: var(--text-dim); padding: 6px 2px; line-height: 1.7; }
+.detail-note { font-size: 11px; color: var(--text-dim); line-height: 1.7; }
+
+/* ==========================================================================
+   账号管理器的三维度展示与同页总览（v2.0.0 · REQ-024 / REQ-025）
+   --------------------------------------------------------------------------
+   格式塔落地要点：
+     · 接近性：模型行内的「更新时间 / 版本 / 下线」紧贴模型名（间距 6px），
+       而「账户额度」属于账号级事实，单独成行并与模型区块保持 6px 间距 ——
+       用户不会把某一行的时间误读成整个账号的时间；
+     · 相似性：额度行与模型行共用 .key-balance / .km-meta 一套排版语言，
+       只用颜色区分「可调用 / 余额不足 / 该协议不提供」三种状态；
+     · 共同区域：跨宿主总览用 <details> 折叠区包住，明确它属于密钥页的
+       二级信息，不展开时只占一行，不与密钥列表争夺注意力；
+     · 图形—背景：元数据用小字号 + 弱色（背景层），模型名保持等宽主色（前景）；
+     · 闭合性：总览默认折叠，展开后内容成组闭合。
+   ========================================================================== */
+
+.key-models .km-meta {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+/* 第一段元数据自右侧起排，把复制按钮留在最右；这样即使没有元数据，行内对齐也不变 */
+.key-models .km-meta:first-of-type,
+.detail-model-row .km-meta:first-of-type { margin-left: auto; }
+.key-models .km-meta.bad-text { color: var(--red); }
+
+.key-balance {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--panel);
+  border-left: 2px solid var(--line);
+}
+.key-balance b { font-size: 11px; font-weight: 600; }
+.key-balance.bal-ok { border-left-color: var(--green); }
+.key-balance.bal-warn { border-left-color: var(--orange); }
+.key-balance.bal-none { border-left-color: var(--line); color: var(--text-dim); }
+.key-balance .bal-gate { font-weight: 600; }
+.key-balance.bal-ok .bal-gate { color: var(--green); }
+.key-balance.bal-warn .bal-gate { color: var(--orange); }
+.key-balance .bal-amount {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+}
+
+/* 跨宿主总览：同页二级区域 */
+.overview-fold {
+  margin: 0 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.overview-fold > summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px;
+  list-style: none;
+  user-select: none;
+}
+.overview-fold > summary::-webkit-details-marker { display: none; }
+.overview-fold > summary::before {
+  content: '▸';
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.overview-fold[open] > summary::before { content: '▾'; }
+.overview-fold > summary:hover { color: var(--accent); }
+.overview-fold .of-title { font-weight: 600; }
+.overview-fold .of-sub { color: var(--text-dim); font-size: 11px; }
+.overview-fold .of-body { padding: 4px 10px 10px; }

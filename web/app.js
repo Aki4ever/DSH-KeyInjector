@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Key 注入器 · 前端逻辑
+   账号管理器 · 前端逻辑
    ------------------------------------------------------------------------
    与 Swift 侧的约定：
      · 调用：window.webkit.messageHandlers.bridge.postMessage({id, method, params})
@@ -10,6 +10,8 @@
    ========================================================================== */
 
 'use strict';
+
+
 
 /* ---------- 桥接 ---------- */
 
@@ -27,7 +29,7 @@ window.__bridgeResolve = function (payload) {
 function call(method, params) {
   return new Promise((resolve, reject) => {
     if (!window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.bridge) {
-      reject(new Error('桥接不可用：请通过 Key 注入器应用打开本页面'));
+      reject(new Error('桥接不可用：请通过 账号管理器应用打开本页面'));
       return;
     }
     const id = 'r' + (++seq);
@@ -38,7 +40,8 @@ function call(method, params) {
         pending.delete(id);
         reject(new Error('调用超时：' + method));
       }
-    }, 30000);
+    // 模型发现会真实请求上游 /models，超时放宽到 120s
+    }, 120000);
   });
 }
 
@@ -59,7 +62,24 @@ const state = {
   selectedTargetID: '',
   targetFilter: 'all',
   editingKey: null,
-  editingTarget: null
+  editingTarget: null,
+  // 密钥库分区视图（REQ-019）：由 call('keysGrouped') 填充
+  keyGroups: [],
+  // 每把 key 的模型发现结果（REQ-020）：keyID -> discovery
+  discoveries: {},
+  // 分区折叠状态（会话内记忆）
+  collapsedGroups: {},
+  keysSearch: '',
+  keysOnlyAttention: false,
+  // 当前打开的密钥详情（REQ-021）
+  detailKeyID: null,
+  // 跨宿主模型清单（DSH + Codex），由 call('hostModels') 填充
+  hostModelGroups: [],
+  gatewayInfo: null,
+  syncPlan: null,
+  hostModelsOverview: null,
+  modelsOverview: null,
+  models: []
 };
 
 /* ---------- 工具 ---------- */
@@ -128,9 +148,40 @@ function fmtTime(iso) {
          p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
+/**
+ * 只到日期（不带时分秒），用于「模型发布时间」这类**厂商侧的事实**。
+ *
+ * 为什么单独一个函数：日期与时间戳混排时，同一列里有的长有的短会破坏对齐；
+ * 模型发布时间本身也只精确到天，展示到秒属于虚假精度。
+ * 兼容三种输入：Swift Date 默认编码（秒级 Double）、毫秒级数字、ISO 字符串。
+ */
+function fmtDate(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  let d;
+  if (typeof value === 'number') {
+    d = new Date(value < 1e11 ? value * 1000 : value);
+  } else {
+    d = new Date(value);
+  }
+  if (isNaN(d.getTime())) return String(value);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
 /* ---------- 导航 ---------- */
 
-function switchPage(page) {
+/**
+ * 切换主页面。
+ *
+ * REQ-025 起「模型清单」不再是一个独立标签页，而是**密钥页内的可折叠总览**：
+ * 格式塔的邻近性与共同区域要求「一把 Key 和它供给的模型」出现在同一容器里，
+ * 跨页跳转会把同一条信息链切断。为兼容旧入口（书签、截图脚本、
+ * 自动化钩子 window.__selectPage('models')），`models` 参数仍被接受，
+ * 但会落到密钥页并自动展开总览。
+ */
+function switchPage(page, options) {
+  const opts = options || {};
+  if (page === 'models') page = 'keys';   // 旧入口兼容：不再存在独立页面
   state.page = page;
   document.querySelectorAll('.nav-item').forEach((el) => {
     el.classList.toggle('active', el.dataset.page === page);
@@ -144,9 +195,37 @@ function switchPage(page) {
     renderRollbackList();
   } else if (page === 'keys') {
     renderKeys();
-  } else if (page === 'models') {
-    loadModels();
+    // 首帧就把跨宿主总览的摘要填好，用户不必展开也能知道有几个模型
+    renderOverviewSummary();
+    // 跨宿主总览与密钥列表同页：从旧入口或旧钩子进来时要把它展开并滚到视野内
+    if (opts.overview) {
+      const fold = $('#keys-overview');
+      if (fold) fold.open = true;
+      loadModels();
+      if (opts.scrollToOverview) fold.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   }
+}
+
+/**
+ * 折叠区标题上的摘要（不展开也能读到关键数字）。
+ *
+ * 为什么值得单独做：格式塔的闭合性要求「收起的状态也要能回答问题」——
+ * 用户收起总览时仍然需要知道模型总数与同步状态，否则每次都得展开一次。
+ */
+function renderOverviewSummary() {
+  const el = $('#overview-summary');
+  if (!el) return;
+  const ov = state.hostModelsOverview || {};
+  const plan = state.syncPlan || null;
+  if (ov.loadError) {
+    el.textContent = '读取失败：' + ov.loadError;
+    return;
+  }
+  const parts = ['模型身份 ' + (ov.uniqueModels || 0) + ' 个'];
+  if (ov.boundKeyCount) parts.push('已绑定密钥 ' + ov.boundKeyCount + ' 把');
+  parts.push(plan ? (plan.allConsistent ? '两个宿主已一致' : '存在差异待同步') : '同步状态未知');
+  el.textContent = parts.join(' · ');
 }
 
 document.querySelectorAll('.nav-item').forEach((el) => {
@@ -160,15 +239,97 @@ async function loadAll() {
   state.providers = await call('providers');
   state.targets = await call('targets');
   await loadKeys();
+  await loadHostModels();
   await loadAudit();
   renderFoot();
 }
 
+/// 读取跨宿主模型清单总览。失败不应阻断启动：
+/// 宿主配置文件可能不存在（例如未装 Codex），此时如实降级而不是白屏。
+async function loadHostModels() {
+  try {
+    const data = await call('hostModels');
+    state.hostModelGroups = data.groups || [];
+    state.hostModelsOverview = data.overview || {};
+    state.hostProviders = data.dshProviders || [];
+    state.gatewayInfo = data.gateway || null;
+    state.syncPlan = data.sync || null;
+  } catch (err) {
+    state.hostModelGroups = [];
+    state.hostModelsOverview = { loadError: String(err.message || err) };
+    state.hostProviders = [];
+    state.gatewayInfo = null;
+    state.syncPlan = null;
+  }
+  renderNavCounts();
+}
+
 async function loadKeys() {
   state.keys = await call('keys', { reveal: state.reveal });
+  // 分区视图与「已缓存的模型发现结果」一起加载。
+  // 关键取舍：首帧**只读缓存**（call('availableModels') 不联网），
+  // 否则打开密钥库就会对所有端点发起真实请求（与「不做后台轮询」的既定边界冲突）。
+  try {
+    // 桥接返回的分区字段名是 records（与后端 KeyGroup 一致），前端统一改名为 keys 使用，
+    // 否则 group.keys 恒为 undefined，会让「看起来正常」的界面悄悄走错分支。
+    const raw = await call('keysGrouped', { reveal: state.reveal });
+    state.keyGroups = (raw || []).map((g) => ({
+      label: g.label,
+      modelCount: g.modelCount,
+      keys: g.records || g.keys || []
+    }));
+  } catch (err) {
+    state.keyGroups = [];
+  }
+  try {
+    state.discoveries = await call('availableModels');
+  } catch (err) {
+    state.discoveries = {};
+  }
   renderKeys();
   renderHealth();
   renderNavCounts();
+}
+
+/// 显式探测单把密钥的可用模型（真实联网，只在用户点击时发生）
+async function discoverKey(id) {
+  const result = await call('discoverKey', { id: id });
+  state.discoveries[id] = result;
+  return result;
+}
+
+/// 显式探测全部密钥的可用模型
+async function discoverAllKeys() {
+  const res = await call('discoverAll', {});
+  Object.keys(res.results || {}).forEach((id) => { state.discoveries[id] = res.results[id]; });
+  return res;
+}
+
+/// 模型的推荐排序：探测到的排前面，同来源按名称
+function sortModels(models) {
+  const rank = { probe: 0, hostMapped: 1, inferred: 2, unknown: 3 };
+  return models.slice().sort((a, b) => {
+    const ra = rank[a.source] === undefined ? 9 : rank[a.source];
+    const rb = rank[b.source] === undefined ? 9 : rank[b.source];
+    if (ra !== rb) return ra - rb;
+    return String(a.modelID).localeCompare(String(b.modelID));
+  });
+}
+
+/// 合并同类模型（去重按模型名归一化），保留置信度最高的一条
+function dedupeModels(models) {
+  const rank = { probe: 0, hostMapped: 1, inferred: 2, unknown: 3 };
+  const keyOf = (id) => String(id).toLowerCase().replace(/^models\//, '').replace(/[^a-z0-9]/g, '');
+  const best = {};
+  models.forEach((m) => {
+    const k = keyOf(m.modelID);
+    if (!k) return;
+    const cur = best[k];
+    const r = rank[m.source] === undefined ? 9 : rank[m.source];
+    const curR = cur ? (rank[cur.source] === undefined ? 9 : rank[cur.source]) : 99;
+    if (!cur || r < curR) best[k] = m;
+  });
+  return sortModels(Object.keys(best).map((k) => best[k]));
 }
 
 async function loadAudit() {
@@ -204,6 +365,231 @@ function renderNavCounts() {
 
 /* ---------- 密钥库 ---------- */
 
+/* ---------- 密钥库：名字分区 + 模型识别（REQ-019 / REQ-020） ---------- */
+
+/**
+ * 模型行内的元数据片段（REQ-024 维度②「更新日期」/ 维度③ 版本）。
+ *
+ * 事实依据（docs/knowledge-account-protocols.md）：
+ *  · OpenAI 形状给 `created`（**发布时间**）与 `shutdown_date`（下线公告）；
+ *  · DeepSeek 形状只给 id/object/owned_by，**没有任何时间字段**；
+ *  · Gemini 的 `version`（如 001）是**版本序号不是时间**，必须标成「版本」。
+ * 协议没给的维度一律显式写「该协议不提供」，绝不用本机时间冒充。
+ */
+function modelMetaLine(meta) {
+  if (!meta) return '<span class="km-meta dim">更新时间：该协议不提供</span>';
+  const parts = [];
+  if (meta.publishedAt) {
+    parts.push('<span class="km-meta" title="' + esc(meta.publishedSource || '协议提供') + '">更新时间 ' +
+      esc(fmtDate(meta.publishedAt)) + '</span>');
+  } else {
+    parts.push('<span class="km-meta dim">更新时间：该协议不提供</span>');
+  }
+  if (meta.versionTag) parts.push('<span class="km-meta dim" title="版本序号，不是日期">版本 ' + esc(meta.versionTag) + '</span>');
+  if (meta.shutdownDate) parts.push('<span class="km-meta bad-text" title="服务商公告的下线时间">下线 ' + esc(meta.shutdownDate) + '</span>');
+  return parts.join('');
+}
+
+/// 账号额度块（REQ-024 维度②：「剩余额度」属于账号级，不属于单个模型）
+function renderBalanceLine(discovery) {
+  const b = discovery && discovery.balance;
+  if (!b) return '';
+  if (b.supported === false) {
+    return '<div class="key-balance bal-none"><b>账户额度</b>' +
+      '<span>该协议不提供</span>' +
+      '<span class="dim">' + esc(b.note || '该厂商的公开接口没有余额端点') + '</span></div>';
+  }
+  const cls = b.isAvailable === false ? 'bal-warn' : (b.isAvailable ? 'bal-ok' : 'bal-none');
+  const gate = b.isAvailable === true ? '可调用' : (b.isAvailable === false ? '余额不足' : '未判定');
+  let html = '<div class="key-balance ' + cls + '"><b>账户额度</b><span class="bal-gate">' + gate + '</span>';
+  const entries = b.entries || [];
+  if (entries.length) {
+    entries.forEach((e) => {
+      html += '<span class="bal-amount">' + esc(String(e.total || '—')) + ' ' + esc(e.currency || '') + '</span>';
+      if (e.granted || e.toppedUp) {
+        html += '<span class="dim small">（赠送 ' + esc(String(e.granted || '0')) + ' / 充值 ' + esc(String(e.toppedUp || '0')) + '）</span>';
+      }
+    });
+  } else {
+    html += '<span class="dim">未返回余额明细</span>';
+  }
+  if (b.fetchedAt) html += '<span class="dim small">取于 ' + esc(fmtTime(b.fetchedAt)) + '</span>';
+  html += '</div>';
+  return html;
+}
+
+/// 模型条目的一行（分区卡片与详情弹窗共用）
+function modelEntry(id, model) {
+  return '<div class="detail-model-row" data-model="' + esc(model.modelID) + '">' +
+    '<span class="status ' + (model.source === 'probe' ? 's-valid' : 's-unchecked') + '"></span>' +
+    '<code class="km-model-id">' + esc(model.modelID) + '</code>' +
+    modelMetaLine(model.metadata) +
+    (model.source ? '<span class="chip src-' + esc(model.source) + '">' + esc(model.sourceLabel || model.source) + '</span>' : '') +
+    (model.confidence ? '<span class="small dim">' + esc(model.confidence) + '</span>' : '') +
+    (model.hostLabel ? '<span class="chip plain">' + esc(model.hostLabel) + '</span>' : '') +
+    (model.credentialKey ? '<span class="chip plain">凭据 ' + esc(model.credentialKey) + '</span>' : '') +
+    '<button class="icon-btn" style="margin-left:auto" data-act="copy-model" data-model="' + esc(model.modelID) +
+      '" title="复制模型 ID">📋</button>' +
+    '</div>' +
+    (model.evidence
+      ? '<div class="small dim evidence" style="padding:0 2px 6px 18px">依据：' + esc(model.evidence) + '</div>'
+      : '');
+}
+
+/// 一次发现结果的摘要行（来源 + 数量 + 端点 + 时间 + 降级原因）
+function discoveryLine(k, discovery) {
+  const probeBtn = '<button class="btn small" data-act="discover" data-id="' + esc(k.id) + '">🔍 ' +
+    (discovery ? '重新识别' : '识别模型') + '</button>';
+  if (!discovery) return '<div class="discovery-line"><span>尚未识别这把 Key 能提供哪些模型</span>' + probeBtn + '</div>';
+  const cls = discovery.probed ? 'src-probe' : 'src-hostMapped';
+  return '<div class="discovery-line">' +
+    '<span class="chip ' + cls + '">' + esc(discovery.sourceLabel || '未知') + '</span>' +
+    '<span>' + (discovery.modelCount || (discovery.models || []).length) + ' 个模型（去重后）</span>' +
+    (discovery.endpoint ? '<code class="mono" style="font-size:10.5px">' + esc(discovery.endpoint) + '</code>' : '') +
+    (discovery.fetchedAt ? '<span>识别于 ' + fmtTime(discovery.fetchedAt) + '</span>' : '') +
+    (discovery.probed ? '' : '<span class="dim" title="' + esc(discovery.note || '') + '">⚠ 已降级</span>') +
+    probeBtn + '</div>';
+}
+
+/**
+ * 渲染某把密钥可提供的模型（REQ-020）。
+ *
+ * 数据优先级：端点实测（discovery）> 宿主配置映射（k.modelBindings）。
+ * 交互取舍（格式塔原理）：
+ *  · 共同区域 + 接近性：模型区块**内嵌在密钥卡里**，与端点、指纹同属一列，
+ *    用户先认出「这是一把 Key 的资料」，再看到它提供了哪些模型；
+ *  · 相似性：来源标签复用既有 .chip 形状，只用颜色区分置信度；
+ *  · 图形—背景：模型行用次级字号与弱色，Key 本身保持主视觉；
+ *  · 闭合性：默认折叠为一行摘要，点击才展开全部模型。
+ */
+function renderKeyModels(k) {
+  const discovery = state.discoveries[k.id];
+  const source = discovery
+    ? (discovery.models || [])
+    : (k.modelBindings || []).map((b) => ({
+        modelID: b.modelID, displayName: b.displayName, source: 'hostMapped',
+        sourceLabel: '宿主映射', confidence: '宿主声明', evidence: b.matchedBy,
+        host: b.host, hostLabel: b.hostLabel, credentialKey: b.credentialKey
+      }));
+  const models = dedupeModels(source);
+  const line = discoveryLine(k, discovery);
+
+  if (!models.length) {
+    return '<div class="key-models empty-note">' +
+      '<span class="km-title">可提供模型</span>' +
+      '<span class="small dim">' +
+        (discovery && discovery.probed === false
+          ? '端点探测未成功，且宿主没有声明绑定这把 Key 的模型（原因见提示）'
+          : '暂未识别：点「识别模型」会请求该 Key 端点的 /models') +
+      '</span>' + line + renderBalanceLine(discovery) + '</div>';
+  }
+
+  const order = ['probe', 'hostMapped', 'inferred', 'unknown'];
+  const bySource = {};
+  models.forEach((m) => {
+    const s = m.source || 'unknown';
+    (bySource[s] = bySource[s] || []).push(m);
+  });
+  const summary = order.filter((s) => bySource[s])
+    .map((s) => (bySource[s][0].sourceLabel || s) + ' ' + bySource[s].length).join(' · ');
+
+  let html = '<div class="key-models" data-models-for="' + esc(k.id) + '">' +
+    '<button class="km-head" type="button" data-act="toggle-models" data-id="' + esc(k.id) + '">' +
+      '<span class="km-caret">▸</span>' +
+      '<span class="km-title">可提供模型 ' + models.length + ' 个</span>' +
+      '<span class="small dim">' + esc(summary) + '</span>' +
+    '</button>' + line +
+    // REQ-024：额度是账号级事实，放在折叠区**外面**常显——
+    // 用户第一眼就该知道「这个账号还能不能调」，不该藏在展开动作之后
+    renderBalanceLine(discovery) +
+    '<div class="km-body hidden">';
+  order.filter((s) => bySource[s]).forEach((s) => {
+    html += '<div class="km-host"><div class="km-host-name">' + esc(bySource[s][0].sourceLabel || s) + '</div>';
+    bySource[s].forEach((m) => { html += modelEntry(k.id, m); });
+    html += '</div>';
+  });
+  html += '<div class="small dim km-foot">来源说明：<b>端点探测</b>是这把 Key 自己端点 /models 的实测结果；' +
+    '<b>宿主映射</b>来自 DSH/Codex 配置声明；<b>推断</b>仅作候选（可能出错）。' +
+    '任何来源都不会被本工具自动写入宿主配置。</div>';
+  html += '</div></div>';
+  return html;
+}
+
+/// 分区标题行：别名 + 厂商 + 状态 + 模型计数 + 该 Key 的操作
+/// 后端 keysGrouped 给出的每分区模型数（渲染前填好，避免前端重复计算）
+let groupModelCountCache = {};
+
+function renderGroupHead(label, keys) {
+  const collapsed = !!state.collapsedGroups[label];
+  const record = keys[0] || {};
+  // 标题计数取「后端给的计数」与「本卡片实际渲染出的模型数」的较大者。
+  // 实测踩坑：本机后端 keysGrouped 的 modelCount 曾返回 0，而同一张卡片由 modelBindings
+  // 渲染出 6 个模型，界面上就出现「标题 0 个、卡片里 6 个」的自相矛盾数字。
+  // 取较大者是两处口径不一致时的安全兜底：宁可多标一个，也不能少标成 0 误导用户。
+  const localCount = dedupeModels((record.modelBindings || []).map((b) => ({ modelID: b.modelID, source: 'hostMapped' }))).length;
+  const backendCount = (groupModelCountCache[label] !== undefined) ? groupModelCountCache[label] : 0;
+  const modelCount = Math.max(backendCount, localCount);
+  const st = (record.lastCheck || {}).status || 'unchecked';
+  const stLabel = (record.lastCheck || {}).label || '未探测';
+  return '<div class="key-group-head" data-act="toggle-group" data-group="' + esc(label) + '">' +
+      '<span class="key-group-caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+      '<span class="status ' + statusClass(st) + '" title="' + esc(stLabel) + '"></span>' +
+      '<span class="key-group-name">' + esc(label) + '</span>' +
+      '<span class="chip">' + esc(providerName(record.providerID)) + '</span>' +
+      (keys.length > 1 ? '<span class="chip plain">' + keys.length + ' 把密钥</span>' : '') +
+      '<span class="chip plain">模型 ' + modelCount + ' 个</span>' +
+      (record.enabled === false ? '<span class="chip plain" style="color:var(--red)">已禁用</span>' : '') +
+      '<span class="key-group-actions">' +
+        '<button class="btn small" data-act="detail" data-id="' + esc(record.id) + '">详情</button>' +
+        '<button class="btn small" data-act="discover" data-id="' + esc(record.id) + '">🔍 识别模型</button>' +
+      '</span>' +
+    '</div>';
+}
+
+/// 单张密钥卡（与 v1.5.0 的卡片一致，只把「供给模型」换成「可提供模型」发现结果）
+function renderKeyCard(k) {
+  const st = (k.lastCheck || {}).status || 'unchecked';
+  const stLabel = (k.lastCheck || {}).label || '未探测';
+  const shown = state.reveal && k.secret ? k.secret : k.hint;
+  return '<div class="key-card" data-id="' + esc(k.id) + '">' +
+      '<div class="key-card-left">' +
+        '<div class="key-card-title-row">' +
+          '<span class="status ' + statusClass(st) + '" title="' + esc(stLabel) + '"></span>' +
+          '<button class="key-card-label" style="background:none;border:0;padding:0;color:inherit;cursor:pointer" ' +
+            'data-act="detail" data-id="' + esc(k.id) + '" title="点击查看详情">' + esc(k.label) + '</button>' +
+          '<span class="chip">' + esc(providerName(k.providerID)) + '</span>' +
+          '<span class="chip plain">优先级 ' + esc(k.priority) + '</span>' +
+          (k.enabled ? '' : '<span class="chip plain" style="color:var(--red)">已禁用</span>') +
+          (k.tags || []).map((t) => '<span class="chip plain">' + esc(t) + '</span>').join('') +
+        '</div>' +
+        '<div class="key-secret-box">' +
+          '<span class="key-secret-text mono">' + esc(shown) + '</span>' +
+          '<button class="icon-btn" data-act="copy-secret" data-id="' + esc(k.id) + '" title="复制当前明文/掩码">📋</button>' +
+        '</div>' +
+        '<div class="key-card-sub">' +
+          (k.baseURL ? '<span>端点: <code class="mono" style="color:var(--accent)">' + esc(k.baseURL) + '</code></span>' : '') +
+          '<span>指纹: <code class="mono">' + esc(k.fingerprint) + '</code></span>' +
+          '<span class="' + statusTextClass(st) + '">● ' + esc(stLabel) +
+            (k.lastCheck && k.lastCheck.latencyMS ? ' (' + k.lastCheck.latencyMS + 'ms)' : '') + '</span>' +
+          (k.note ? '<span class="dim">备注: ' + esc(k.note) + '</span>' : '') +
+          '<span class="dim">更新于 ' + fmtTime(k.updatedAt || k.createdAt) + '</span>' +
+        '</div>' +
+        // 模型区块与端点/指纹同属 .key-card-left 一列：
+        // 接近性（列内 gap 6px < 卡片间距 12px）让它被读成「这张密钥卡的一部分」，
+        // 共同区域则把它与右侧的编辑/探测按钮区分开。
+        renderKeyModels(k) +
+      '</div>' +
+      '<div class="key-card-dock">' +
+        '<button class="btn small" data-act="detail" data-id="' + esc(k.id) + '">详情</button>' +
+        '<button class="btn small" data-act="edit" data-id="' + esc(k.id) + '">✏️ 编辑</button>' +
+        '<button class="btn small" data-act="check" data-id="' + esc(k.id) + '">🩺 探测</button>' +
+        '<label class="switch" title="启用/禁用"><input type="checkbox" data-act="toggle" data-id="' +
+          esc(k.id) + '"' + (k.enabled ? ' checked' : '') + '><span></span></label>' +
+        '<button class="icon-btn" data-act="delete" data-id="' + esc(k.id) + '" title="删除">🗑</button>' +
+      '</div>' +
+    '</div>';
+}
+
 function renderKeys() {
   const host = $('#keys-host');
   if (!state.keys.length) {
@@ -213,43 +599,56 @@ function renderKeys() {
     return;
   }
 
+  // 分区来源：优先用后端返回的 keysGrouped（与 CLI 分区口径完全一致）；
+  // 若该调用失败（旧版桥接），退化为「按别名就地分组」，保证界面始终按名字分区。
+  let groups = state.keyGroups;
+  if (!groups.length) {
+    const byLabel = {};
+    state.keys.forEach((k) => { (byLabel[k.label] = byLabel[k.label] || []).push(k); });
+    groups = Object.keys(byLabel).map((label) => ({ label: label, keys: byLabel[label] }));
+  }
+
+  groupModelCountCache = {};
+  groups.forEach((g) => { if (g && g.label) groupModelCountCache[g.label] = g.modelCount; });
+
+  const q = state.keysSearch.trim().toLowerCase();
+  const visible = groups.map((group) => {
+    const keys = (group.keys || []).filter((k) => {
+      if (state.keysOnlyAttention) {
+        const st = (k.lastCheck || {}).status;
+        const discovered = state.discoveries[k.id];
+        const attention = !st || st === 'unchecked' || st === 'invalid' || st === 'quota'
+          || (discovered && !discovered.probed);
+        if (!attention) return false;
+      }
+      if (!q) return true;
+      const models = (state.discoveries[k.id] || {}).models || [];
+      const haystack = [
+        group.label, k.label, k.providerID, providerName(k.providerID), k.baseURL || '', k.note || '',
+        (k.tags || []).join(' '),
+        models.map((m) => m.modelID).join(' '),
+        (k.modelBindings || []).map((b) => b.modelID).join(' ')
+      ].join(' ').toLowerCase();
+      return haystack.indexOf(q) >= 0;
+    });
+    return { group: group, keys: keys };
+  }).filter((item) => item.keys.length);
+
+  if (!visible.length) {
+    host.innerHTML = '<div class="empty"><div class="big">🔍</div><div>没有匹配的密钥分区</div>' +
+      '<div class="small" style="margin-top:6px">试试清空搜索词，或取消「仅看未探测 / 异常」筛选。</div></div>';
+    return;
+  }
+
   let html = '';
-  state.keys.forEach((k) => {
-    const st = (k.lastCheck || {}).status || 'unchecked';
-    const stLabel = (k.lastCheck || {}).label || '未探测';
-    const shown = state.reveal && k.secret ? k.secret : k.hint;
-    html +=
-      '<div class="key-card" data-id="' + esc(k.id) + '">' +
-        '<div class="key-card-left">' +
-          '<div class="key-card-title-row">' +
-            '<span class="status ' + statusClass(st) + '" title="' + esc(stLabel) + '"></span>' +
-            '<span class="key-card-label">' + esc(k.label) + '</span>' +
-            '<span class="chip">' + esc(providerName(k.providerID)) + '</span>' +
-            '<span class="chip plain">优先级 ' + esc(k.priority) + '</span>' +
-            (k.enabled ? '' : '<span class="chip plain" style="color:var(--red)">已禁用</span>') +
-            (k.tags || []).map((t) => '<span class="chip plain">' + esc(t) + '</span>').join('') +
-          '</div>' +
-          '<div class="key-secret-box">' +
-            '<span class="key-secret-text mono">' + esc(shown) + '</span>' +
-            '<button class="icon-btn" data-act="copy-secret" data-id="' + esc(k.id) + '" title="复制当前明文/掩码">📋</button>' +
-          '</div>' +
-          '<div class="key-card-sub">' +
-            (k.baseURL ? '<span>端点: <code class="mono" style="color:var(--accent)">' + esc(k.baseURL) + '</code></span>' : '') +
-            '<span>指纹: <code class="mono">' + esc(k.fingerprint) + '</code></span>' +
-            '<span class="' + statusTextClass(st) + '">● ' + esc(stLabel) +
-              (k.lastCheck && k.lastCheck.latencyMS ? ' (' + k.lastCheck.latencyMS + 'ms)' : '') + '</span>' +
-            (k.note ? '<span class="dim">备注: ' + esc(k.note) + '</span>' : '') +
-            '<span class="dim">更新于 ' + fmtTime(k.updatedAt || k.createdAt) + '</span>' +
-          '</div>' +
-        '</div>' +
-        '<div class="key-card-dock">' +
-          '<button class="btn small" data-act="edit" data-id="' + esc(k.id) + '">✏️ 编辑</button>' +
-          '<button class="btn small" data-act="check" data-id="' + esc(k.id) + '">🩺 探测</button>' +
-          '<label class="switch" title="启用/禁用"><input type="checkbox" data-act="toggle" data-id="' +
-            esc(k.id) + '"' + (k.enabled ? ' checked' : '') + '><span></span></label>' +
-          '<button class="icon-btn" data-act="delete" data-id="' + esc(k.id) + '" title="删除">🗑</button>' +
-        '</div>' +
-      '</div>';
+  visible.forEach((item) => {
+    const group = item.group;
+    const collapsed = !!state.collapsedGroups[group.label];
+    html += '<div class="key-group" data-group="' + esc(group.label) + '">' +
+      renderGroupHead(group.label, item.keys) +
+      '<div class="key-group-body' + (collapsed ? ' collapsed' : '') + '">';
+    item.keys.forEach((k) => { html += renderKeyCard(k); });
+    html += '</div></div>';
   });
 
   if (state.reveal) {
@@ -264,8 +663,40 @@ $('#keys-host').addEventListener('click', async (e) => {
   const id = btn.dataset.id;
   const act = btn.dataset.act;
   const record = state.keys.find((k) => k.id === id);
+  const groupLabel = btn.dataset.group;
   try {
-    if (act === 'edit') {
+    if (act === 'toggle-group') {
+      // 就近折叠：只切换本分区，不重排整页（格式塔的连续性）
+      state.collapsedGroups[groupLabel] = !state.collapsedGroups[groupLabel];
+      const grp = btn.closest('.key-group');
+      const body = grp && grp.querySelector('.key-group-body');
+      if (body) body.classList.toggle('collapsed', !!state.collapsedGroups[groupLabel]);
+      const caret = btn.querySelector('.key-group-caret');
+      if (caret) caret.textContent = state.collapsedGroups[groupLabel] ? '▸' : '▾';
+    } else if (act === 'toggle-models') {
+      // 就地展开/收起：不重新渲染整张卡，避免用户视角跳位
+      const box = btn.closest('.key-models');
+      const body = box && box.querySelector('.km-body');
+      if (body) {
+        body.classList.toggle('hidden');
+        const caret = btn.querySelector('.km-caret');
+        if (caret) caret.textContent = body.classList.contains('hidden') ? '▸' : '▾';
+      }
+    } else if (act === 'detail') {
+      await openKeyDetail(id);
+    } else if (act === 'discover') {
+      // 显式联网动作：只有用户点击才会请求该 Key 的端点
+      banner('info', '正在识别这把密钥可提供的模型…');
+      const result = await discoverKey(id);
+      banner(result.probed ? 'success' : 'warning', result.probed
+        ? '端点探测成功：识别到 ' + (result.modelCount || 0) + ' 个模型（' + result.endpoint + '）'
+        : '端点探测未成功，已降级为' + (result.sourceLabel || '未知') + '：' + (result.note || ''));
+      await loadKeys();
+      if (state.detailKeyID === id) await openKeyDetail(id);
+    } else if (act === 'copy-model') {
+      await call('copy', { text: btn.dataset.model || '' });
+      banner('success', '已复制模型 ID：' + (btn.dataset.model || ''));
+    } else if (act === 'edit') {
       if (record) openModal('edit', record);
     } else if (act === 'copy-secret') {
       try {
@@ -303,6 +734,47 @@ $('#keys-host').addEventListener('change', async (e) => {
   try {
     await call('setEnabled', { id: input.dataset.id, enabled: input.checked });
     await loadKeys();
+  } catch (err) {
+    banner('error', String(err.message || err));
+  }
+});
+
+/* ---------- 密钥库工具栏（搜索 / 筛选 / 折叠 / 批量识别） ---------- */
+
+$('#keys-search').addEventListener('input', (e) => {
+  state.keysSearch = e.target.value || '';
+  $('#keys-search-clear').classList.toggle('hidden', !state.keysSearch);
+  renderKeys();
+});
+
+$('#keys-search-clear').addEventListener('click', () => {
+  state.keysSearch = '';
+  $('#keys-search').value = '';
+  $('#keys-search-clear').classList.add('hidden');
+  renderKeys();
+});
+
+$('#keys-filter-attention').addEventListener('change', (e) => {
+  state.keysOnlyAttention = e.target.checked;
+  renderKeys();
+});
+
+$('#btn-groups-toggle').addEventListener('click', (e) => {
+  const labels = state.keyGroups.length ? state.keyGroups.map((g) => g.label) : state.keys.map((k) => k.label);
+  const anyExpanded = labels.some((l) => !state.collapsedGroups[l]);
+  labels.forEach((l) => { state.collapsedGroups[l] = anyExpanded; });
+  e.target.textContent = anyExpanded ? '⇕ 全部展开' : '⇕ 全部折叠';
+  renderKeys();
+});
+
+$('#btn-discover-all').addEventListener('click', async () => {
+  try {
+    banner('info', '正在对全部密钥识别可用模型（会逐把请求其端点 /models）…');
+    const res = await discoverAllKeys();
+    banner(res.probed === res.total ? 'success' : 'warning',
+      '模型识别完成：' + res.probed + '/' + res.total + ' 把密钥成功从端点取证（其余为宿主映射兜底）');
+    await loadKeys();
+    await loadAudit();
   } catch (err) {
     banner('error', String(err.message || err));
   }
@@ -505,7 +977,166 @@ $('#modal-save').addEventListener('click', async () => {
   }
 });
 
-/* ---------- 注入中心 ---------- */
+/* ---------- 密钥详情（REQ-021） ---------- */
+
+/// 打开某把密钥的详情视图：完整元数据 + 可用模型 + 注入落点 + 审计摘要
+async function openKeyDetail(id) {
+  state.detailKeyID = id;
+  $('#detail-body').innerHTML = '<div class="detail-empty">正在读取详情…</div>';
+  $('#detail-mask').classList.remove('hidden');
+  try {
+    const detail = await call('keyDetail', { id: id });
+    renderKeyDetail(detail);
+  } catch (err) {
+    $('#detail-body').innerHTML = '<div class="detail-empty">读取详情失败：' + esc(String(err.message || err)) + '</div>';
+  }
+}
+
+function closeKeyDetail() {
+  state.detailKeyID = null;
+  $('#detail-mask').classList.add('hidden');
+}
+
+function detailKV(k, v) {
+  return '<div class="detail-kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+}
+
+/// 详情五段信息架构：身份 / 健康 / 模型 / 落点 / 时间线
+function renderKeyDetail(detail) {
+  const r = detail.record || {};
+  const discovery = detail.discovery || null;
+  const models = dedupeModels(detail.availableModels || []);
+  const locations = detail.locations || [];
+  const audit = detail.audit || [];
+
+  $('#detail-title').textContent = '密钥详情：' + (r.label || '');
+  $('#detail-provider').textContent = providerName(r.providerID);
+  $('#detail-foot').textContent = '模型来源与依据如实标注；本工具不会据此自动改写宿主配置';
+
+  let html = '<div class="detail-section"><h3>身份</h3><div class="detail-grid">' +
+    detailKV('别名', esc(r.label)) +
+    detailKV('厂商', esc(providerName(r.providerID)) + ' <code class="mono">' + esc(r.providerID) + '</code>') +
+    detailKV('端点', r.baseURL ? '<code class="mono">' + esc(r.baseURL) + '</code>' : '<span class="dim">未填写，使用厂商默认</span>') +
+    detailKV('掩码', '<code class="mono">' + esc(r.hint) + '</code>') +
+    detailKV('指纹', '<code class="mono">' + esc(r.fingerprint) + '</code>') +
+    detailKV('优先级', esc(String(r.priority))) +
+    detailKV('启用状态', r.enabled ? '<span class="t-valid">● 已启用</span>' : '<span class="t-invalid">● 已禁用</span>') +
+    detailKV('标签', (r.tags || []).length ? esc((r.tags || []).join('、')) : '<span class="dim">—</span>') +
+    detailKV('备注', r.note ? esc(r.note) : '<span class="dim">—</span>') +
+    detailKV('创建 / 更新', fmtTime(r.createdAt) + ' / ' + fmtTime(r.updatedAt)) +
+    '</div></div>';
+
+  const lc = r.lastCheck || {};
+  html += '<div class="detail-section"><h3>健康探测 <span class="small dim">只代表此刻鉴权是否通过，不代表额度与模型可用性</span></h3>' +
+    '<div class="detail-grid">' +
+    detailKV('状态', '<span class="' + statusTextClass(lc.status) + '">● ' + esc(lc.label || '未探测') + '</span>') +
+    detailKV('HTTP', lc.httpStatus ? esc(String(lc.httpStatus)) : '<span class="dim">—</span>') +
+    detailKV('延迟', lc.latencyMS ? esc(lc.latencyMS + ' ms') : '<span class="dim">—</span>') +
+    detailKV('探测时间', lc.checkedAt ? fmtTime(lc.checkedAt) : '<span class="dim">—</span>') +
+    detailKV('消息', lc.message ? esc(lc.message) : '<span class="dim">—</span>') +
+    '</div></div>';
+
+  html += '<div class="detail-section"><h3>可提供的模型 ' +
+    '<span class="chip ' + (discovery && discovery.probed ? 'src-probe' : 'src-hostMapped') + '">' +
+    esc(discovery ? (discovery.sourceLabel || '未知') : '尚未识别') + '</span>' +
+    '<span class="small dim">共 ' + models.length + ' 个</span></h3>';
+  if (discovery) {
+    html += '<div class="detail-note">识别说明：' + esc(discovery.note || '—') + '　·　识别于 ' +
+      fmtTime(discovery.fetchedAt) + (discovery.endpoint ? '　·　端点 ' + esc(discovery.endpoint) : '') + '</div>';
+  } else {
+    html += '<div class="detail-note">尚未识别。点下方「重新探测模型」会请求该 Key 端点的 <code>/models</code>；' +
+      '失败时自动降级到宿主声明映射，并如实标注来源与依据。</div>';
+  }
+  if (detail.probeable === false) {
+    html += '<div class="detail-note" style="color:var(--orange)">⚠️ 这把 Key 目前没有可探测端点：厂商预设没有探测路径，' +
+      '且未填写 Base URL。可在「编辑」里补上端点后再探测。</div>';
+  }
+  html += '<div style="margin-top:8px">';
+  if (models.length) {
+    models.forEach((m) => { html += modelEntry(r.id, m); });
+  } else {
+    html += '<div class="detail-empty">暂无模型记录（端点未探测成功，且宿主没有声明绑定这把 Key 的模型）。</div>';
+  }
+  html += '</div></div>';
+
+  html += '<div class="detail-section"><h3>注入落点 <span class="small dim">来自审计日志的成功写入记录</span></h3>';
+  if (locations.length) {
+    locations.forEach((l) => {
+      html += '<div class="detail-model-row">' +
+        '<code class="km-model-id">' + esc(l.targetName) + '</code>' +
+        '<span class="chip plain">' + esc(l.targetID) + '</span>' +
+        (l.itemKey ? '<span class="chip plain">键名 ' + esc(l.itemKey) + '</span>' : '') +
+        '<span class="small dim" style="margin-left:auto">最近 ' + fmtTime(l.lastInjectedAt) + '</span>' +
+        '</div><div class="small dim evidence" style="padding:0 2px 6px 18px">' + esc(l.filePath) + '</div>';
+    });
+  } else {
+    html += '<div class="detail-empty">这把 Key 尚未注入到任何落点。</div>';
+  }
+  html += '</div>';
+
+  html += '<div class="detail-section"><h3>最近审计记录</h3>';
+  if (audit.length) {
+    audit.forEach((a) => {
+      html += '<div class="detail-model-row">' +
+        '<span class="chip plain">' + esc(a.actionLabel || a.action) + '</span>' +
+        '<span class="small">' + esc(a.message) + '</span>' +
+        '<span class="small dim" style="margin-left:auto">' + fmtTime(a.timestamp) + '</span>' +
+        '</div>';
+    });
+  } else {
+    html += '<div class="detail-empty">暂无与该密钥相关的审计记录。</div>';
+  }
+  html += '</div>';
+
+  $('#detail-body').innerHTML = html;
+}
+
+$('#detail-close').addEventListener('click', closeKeyDetail);
+$('#detail-close-2').addEventListener('click', closeKeyDetail);
+$('#detail-mask').addEventListener('click', (e) => { if (e.target === $('#detail-mask')) closeKeyDetail(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#detail-mask').classList.contains('hidden')) closeKeyDetail();
+});
+
+$('#detail-body').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-act="copy-model"]');
+  if (!btn) return;
+  await call('copy', { text: btn.dataset.model || '' });
+  banner('success', '已复制模型 ID：' + (btn.dataset.model || ''));
+});
+
+// 鉴权探测与模型探测是两件事，按钮文案必须说清：
+// 「探测」= 该端点的健康检查（鉴权/额度）；「识别模型」= 读 /models 清单。
+$('#detail-health').addEventListener('click', async () => {
+  const id = state.detailKeyID;
+  const record = state.keys.find((k) => k.id === id);
+  if (!id || !record) return;
+  try {
+    banner('info', '正在探测「' + (record.label || '') + '」的鉴权状态…');
+    const res = await call('checkKey', { id: id });
+    banner(res.status === 'valid' ? 'success' : 'warning', '探测结果：' + res.label + ' — ' + res.message);
+    await loadKeys();
+    await openKeyDetail(id);
+  } catch (err) {
+    banner('error', String(err.message || err));
+  }
+});
+
+$('#detail-probe').addEventListener('click', async () => {
+  const id = state.detailKeyID;
+  if (!id) return;
+  try {
+    banner('info', '正在识别这把密钥可提供的模型…');
+    const result = await discoverKey(id);
+    banner(result.probed ? 'success' : 'warning', result.probed
+      ? '端点探测成功：' + result.endpoint
+      : '端点探测未成功，已降级为' + (result.sourceLabel || '未知') + '：' + (result.note || ''));
+    await loadKeys();
+    await openKeyDetail(id);
+  } catch (err) {
+    banner('error', String(err.message || err));
+  }
+});
 
 function injectForm() {
   const target = targetById(state.selectedTargetID) || state.targets[0];
@@ -1119,11 +1750,11 @@ function renderSettings() {
   const i = state.info;
   $('#settings-info').innerHTML =
     '<h2>数据位置</h2>' +
-    kv('数据目录', i.root || '—', true) +
-    kv('密钥后端', i.storeBackend || '—') +
-    kv('审计文件', i.auditFile || '—', true) +
-    kv('厂商数量', i.providerCount || '0') +
-    kv('落点数量', i.targetCount || '0') +
+    detailKV('数据目录', i.root || '—', true) +
+    detailKV('密钥后端', i.storeBackend || '—') +
+    detailKV('审计文件', i.auditFile || '—', true) +
+    detailKV('厂商数量', i.providerCount || '0') +
+    detailKV('落点数量', i.targetCount || '0') +
     ((i.bootWarnings && i.bootWarnings.length)
       ? '<div class="warn-box">' + i.bootWarnings.map(esc).join('<br>') + '</div>' : '');
 
@@ -1210,6 +1841,30 @@ window.__selectPage = function (page) { switchPage(page); };
 window.__openAddKeyModal = function () { openModal(); };
 window.__closeAddKeyModal = function () { closeModal(); };
 window.__setBanner = function (kind, text) { banner(kind, text); };
+window.__clearBanner = function () { var h = document.querySelector('#banner-host'); if (h) h.innerHTML = ''; };
+
+/// 展开第一个分区的模型区块（截图台账用）
+window.__expandKeyModels = function () {
+  const boxes = document.querySelectorAll('#keys-host .key-models .km-body');
+  boxes.forEach((b) => {
+    b.classList.remove('hidden');
+    const caret = b.parentNode.querySelector('.km-caret');
+    if (caret) caret.textContent = '▾';
+  });
+  return 'expanded:' + boxes.length;
+};
+
+/// 关闭详情视图（截图台账用）
+window.__closeKeyDetail = function () { closeKeyDetail(); };
+
+/// 打开第一把密钥的详情视图（截图台账用）
+window.__openKeyDetail = function () {
+  const key = state.keys[0];
+  if (!key) return 'no-keys';
+  openKeyDetail(key.id);
+  return 'detail:' + key.id;
+};
+
 window.__snapshotSetPath = function (path) {
   const el = document.querySelector('#i-path');
   if (el) el.value = path;
@@ -1225,82 +1880,222 @@ state.models = null;
 state.modelsOverview = null;
 
 async function loadModels() {
+  // 模型清单页以「跨宿主清单 + 网关事实源 + 同步计划」为唯一数据源。
+  // 取舍：这里不读 Codex 目录的旧 models 接口——网关才是模型名的权威（REQ-018）。
+  const all = $('#models-show-all') && $('#models-show-all').checked;
   try {
-    const all = $('#models-show-all') && $('#models-show-all').checked;
-    const data = await call('models', { all: !!all });
-    state.models = data.models || [];
-    state.modelsOverview = data.overview || {};
-    renderRouteCard();
-    renderModels();
+    await loadHostModels();
+    renderGatewayCard();
+    renderModelsOverview();
+    renderHostModels();
+    renderOverviewSummary();
+    await loadModelsAdmin(all);
   } catch (e) {
-    $('#models-host').innerHTML = '<div class="empty">读取模型目录失败：' + esc(e.message) + '</div>';
+    const host = $('#models-host');
+    if (host) host.innerHTML = '<div class="empty">读取跨宿主模型清单失败：' + esc(e.message) + '</div>';
   }
 }
 
-async function renderRouteCard() {
-  const host = $('#route-card');
-  try {
-    const r = await call('gatewayCheck');
-    const ok = r.healthy;
-    host.innerHTML =
-      '<h2>Codex 网关路由体检</h2>' +
-      '<div class="small ' + (ok ? 'ok-text' : 'bad-text') + '">' + esc(r.summary) + '</div>' +
-      '<div class="small dim" style="margin-top:6px">配置文件：' + esc(r.configPath) + '</div>' +
-      '<div style="margin-top:10px"><button class="btn ' + (ok ? '' : 'primary') + '" id="btn-route-fix"' + (ok ? ' disabled' : '') + '>修复路由（写回 codex_gateway）</button>' +
-      '<span class="small dim" style="margin-left:8px">launchd 常驻守护每 10 秒自动体检一次，通常无需手动修复</span></div>';
-    const btn = $('#btn-route-fix');
-    if (btn) {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        try {
-          const res = await call('gatewayRepair');
-          banner('success', '已修复路由：' + res.summary + (res.backupPath ? '（备份：' + res.backupPath + '）' : ''));
-        } catch (e) {
-          banner('error', '修复失败：' + e.message);
-        }
-        renderRouteCard();
-      });
-    }
-  } catch (e) {
-    host.innerHTML = '<div class="empty">路由体检失败：' + esc(e.message) + '</div>';
-  }
+/// 折叠区展开时的内容刷新钩子（供 details 的 toggle 事件调用）
+function refreshOverviewFold() {
+  const fold = $('#keys-overview');
+  if (fold && fold.open) loadModels();
 }
 
-function renderModels() {
-  const ov = state.modelsOverview || {};
-  if ($('#catalog-path')) $('#catalog-path').textContent = ov.catalogPath || '~/.codex/codex-gateway-models.json';
+/* ---------- 模型清单：网关事实源卡片（REQ-018） ---------- */
 
-  $('#models-origin').innerHTML =
-    '<h2>清单从哪来</h2>' +
-    '<div class="small">① Codex 官方条目：来自 Codex 自带的 <code>codex debug models --bundled</code>，本工具不改动它们。</div>' +
-    '<div class="small">② 公司网关条目：由「密钥库 → 一键注入」或 <code>keyinject models add</code> 写入，' +
-    '显示名带「（公司网关）」后缀，并在 <code>config.toml</code> 里通过 <code>model_provider = "codex_gateway"</code> 路由到你的网关 <code>' + esc(ov.configProvider || '-') + '</code>。</div>' +
-    '<div class="small dim" style="margin-top:8px">目录共 ' + (ov.total || 0) + ' 条：公司网关 ' + (ov.gateway || 0) + ' 条（菜单可见 ' + (ov.gatewayInPicker || 0) + '），官方 ' + ((ov.total || 0) - (ov.gateway || 0)) + ' 条（菜单可见 ' + (ov.officialInPicker || 0) + '）。' +
-    '已注册到 config.toml：' + (ov.registeredInConfig ? '是' : '否') + '；当前默认模型：' + esc(ov.configModel || '(未设置)') + '。</div>';
-
-  const host = $('#models-host');
-  if (!state.models || !state.models.length) {
-    host.innerHTML = '<div class="empty">还没有公司网关模型。点右上角「＋ 新增网关模型」，或到「注入中心」执行一键注入来自动登记。</div>';
+function renderGatewayCard() {
+  const host = $('#models-gateway');
+  const gw = state.gatewayInfo;
+  const plan = state.syncPlan;
+  if (!host) return;
+  if (!gw) {
+    host.innerHTML = '<h2>网关事实源</h2><div class="empty">未读取到网关配置：' +
+      '<code>~/.config/codex-gateway/config.json</code> 不存在或不可解析。本工具不猜测任何模型名，' +
+      '因此同步动作已整体跳过。</div>';
     return;
   }
-  let html = '<h2>条目明细</h2>';
-  state.models.forEach((m) => {
-    const chipCls = m.isGateway ? 'chip warn' : 'chip';
-    html += '<div class="key-row">' +
-      '<span class="status ' + (m.inPicker ? 's-valid' : 's-unchecked') + '"></span>' +
-      '<div class="key-main">' +
-        '<div class="key-title"><span class="key-label">' + esc(m.displayName) + '</span>' +
-        '<span class="' + chipCls + '">' + esc(m.source) + '</span>' +
-        '<span class="chip">' + (m.inPicker ? '菜单可见' : '已隐藏') + '</span></div>' +
-        '<div class="key-meta"><code>' + esc(m.slug) + '</code></div>' +
-        (m.description ? '<div class="small dim" style="margin-top:3px">' + esc(m.description) + '</div>' : '') +
-      '</div>' +
-      '<button class="btn small" data-model-toggle="' + esc(m.slug) + '" data-in-picker="' + (m.inPicker ? '1' : '0') + '">' + (m.inPicker ? '隐藏' : '显示') + '</button>' +
-      (m.isGateway ? '<button class="btn small danger" data-model-rm="' + esc(m.slug) + '">删除</button>' : '') +
-      '</div>';
+  const routes = gw.routes || [];
+  let html = '<h2>网关事实源 <span class="chip ' + (gw.available ? 'src-probe' : 'src-inferred') + '">' +
+    (gw.available ? '可用' : '不可用') + '</span></h2>' +
+    '<div class="small">配置文件：<code class="mono">' + esc(gw.sourcePath || '-') + '</code>　·　' +
+    '上游基址：<code class="mono">' + esc(gw.baseURL || '-') + '</code>　·　' +
+    '上游模型 ' + (gw.models || []).length + ' 条　·　线路 ' + routes.length + ' 条</div>';
+  if (routes.length) {
+    html += '<div style="margin-top:8px">';
+    routes.forEach((r) => {
+      html += '<div class="detail-model-row"><code class="km-model-id">' + esc(r.route) + '</code>' +
+        '<span class="dim small">→</span><code class="mono small">' + esc(r.upstreamModel) + '</code></div>';
+    });
+    html += '</div>';
+  }
+  if (plan) {
+    const dsh = plan.dsh || {};
+    const codex = plan.codex || {};
+    html += '<div style="margin-top:10px" class="small">同步计划：' +
+      (plan.allConsistent ? '两个宿主都已一致' : '存在差异，需要同步') + '　·　' +
+      'DSH：' + esc(dsh.summary || '—') + '　·　Codex：' + esc(codex.summary || '—') + '</div>';
+    [dsh, codex].forEach((t) => {
+      (t.notes || []).forEach((n) => { html += '<div class="small dim">• ' + esc(n) + '</div>'; });
+      if (t.failure) html += '<div class="small bad-text">⚠ ' + esc(t.failure) + '</div>';
+    });
+    html += '<div style="margin-top:10px">' +
+      '<button class="btn primary" id="btn-sync-apply"' + (plan.allConsistent ? ' disabled' : '') +
+      '>同步差异到 DSH 与 Codex（先备份）</button>' +
+      '<span class="small dim" style="margin-left:8px">默认只增不减：DSH 侧不会删除你自建的模型</span></div>';
+    const btn = $('#btn-sync-apply');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        if (!confirm('确认把网关声明的差异同步到 DSH 与 Codex？\n写入前会自动备份原文件。')) return;
+        btn.disabled = true;
+        try {
+          const res = await call('syncApply');
+          banner('success', '同步完成：DSH ' + (res.dsh ? res.dsh.summary : '—') + '；Codex ' + (res.codex ? res.codex.summary : '—'));
+        } catch (e) {
+          banner('error', '同步失败：' + e.message);
+        }
+        await loadModels();
+        await loadAudit();
+      });
+    }
+  }
+  host.innerHTML = html;
+}
+
+/* ---------- 模型清单：跨宿主总览（REQ-016） ---------- */
+
+function renderModelsOverview() {
+  const host = $('#models-origin');
+  const ov = state.hostModelsOverview || {};
+  if (!host) return;
+  if (ov.loadError) {
+    host.innerHTML = '<h2>清单从哪来</h2><div class="empty">读取失败：' + esc(ov.loadError) + '</div>';
+    return;
+  }
+  const dshExists = ov.dshSettingsExists ? '' : '<span class="bad-text">文件不存在</span>';
+  host.innerHTML = '<h2>清单从哪来</h2>' +
+    '<div class="small">① <b>DSH 桌面端</b>：<code class="mono">' + esc(ov.dshSettingsPath || '-') + '</code> ' + dshExists +
+      '　声明模型 <b>' + (ov.dshDeclared || 0) + '</b> 条，凭据已配置 <b>' + (ov.dshCredentialConfigured || 0) + '</b> 条' +
+      '（只读：本工具不写入 settings.yaml）</div>' +
+    '<div class="small">② <b>Codex 桌面端</b>：<code class="mono">' + esc(ov.codexCatalogPath || '-') + '</code>　' +
+      '网关条目 <b>' + (ov.codexGatewayCount || 0) + '</b> 条，官方条目 ' + (ov.codexOfficialCount || 0) + ' 条；' +
+      '当前默认模型 <code class="mono">' + esc(ov.codexConfigModel || '(未设置)') + '</code>' +
+      '，供应商 <code class="mono">' + esc(ov.codexConfigProvider || '-') + '</code>' +
+      '，路由体检 ' + (ov.codexRoutingHealthy ? '<span class="ok-text">正常</span>' : '<span class="bad-text">异常</span>') + '</div>' +
+    '<div class="small dim" style="margin-top:8px">两份声明合并去重后共 <b>' + (ov.uniqueModels || 0) + '</b> 个模型身份' +
+      '（原始声明 ' + (ov.total || 0) + ' 条，同一模型在两边的别名已归并为一条）；' +
+      '其中已有密钥绑定 <b>' + (ov.boundKeyCount || 0) + '</b> 把。</div>' +
+    '<div class="small dim">模型名与地址的事实源是网关自己的配置：本工具不内置任何模型名单，' +
+      '网关加模型后执行一次同步即可补齐差异。</div>';
+}
+
+/* ---------- 模型清单：跨宿主模型明细 ---------- */
+
+function renderHostModels() {
+  const host = $('#models-host');
+  const groups = state.hostModelGroups || [];
+  if (!host) return;
+  if (!groups.length) {
+    host.innerHTML = '<div class="empty">没有读到任何宿主的模型声明。' +
+      '<div class="small" style="margin-top:6px">请确认 DSH 的 settings.yaml 与 Codex 的 codex-gateway-models.json 至少存在一个。</div></div>';
+    return;
+  }
+  const q = ($('#models-filter') && $('#models-filter').value || '').trim().toLowerCase();
+  let html = '<h2>条目明细 <span class="small dim">共 ' + groups.length + ' 个模型身份</span></h2>';
+  let shown = 0;
+  groups.forEach((g) => {
+    const haystack = [g.displayName, g.normalizedID, (g.aliases || []).join(' '),
+      (g.records || []).map((r) => r.credentialKey + ' ' + r.endpoint + ' ' + r.owner).join(' ')].join(' ').toLowerCase();
+    if (q && haystack.indexOf(q) < 0) return;
+    shown++;
+    html += '<div class="key-group" style="margin-bottom:10px">' +
+      '<div class="model-group-head">' +
+        '<span class="key-group-name">' + esc(g.displayName || g.normalizedID) + '</span>' +
+        (g.isGateway ? '<span class="chip warn">网关模型</span>' : '') +
+        (g.hosts || []).map((h) => '<span class="chip plain">' + esc(h.label) + '</span>').join('') +
+        '<span class="chip plain">' + (g.records || []).length + ' 条声明</span>' +
+      '</div><div style="padding:4px 0 0 4px">';
+    (g.records || []).forEach((r) => {
+      html += '<div class="detail-model-row">' +
+        '<code class="km-model-id">' + esc(r.id) + '</code>' +
+        '<span class="chip plain">' + esc(r.hostLabel) + '</span>' +
+        (r.inMenu ? '<span class="chip plain">菜单可见</span>' : '<span class="chip plain">已隐藏</span>') +
+        (r.credentialKey ? '<span class="chip plain">凭据 ' + esc(r.credentialKey) + '</span>' : '') +
+        '<button class="icon-btn" style="margin-left:auto" data-act="copy-model" data-model="' + esc(r.id) + '" title="复制模型 ID">📋</button>' +
+        '</div>' +
+        '<div class="small dim evidence" style="padding:0 2px 6px 18px">来源 ' + esc(r.sourcePath) +
+          (r.endpoint ? '　·　端点 ' + esc(r.endpoint) : '') + '</div>';
+    });
+    html += '</div></div>';
   });
+  if (!shown) html += '<div class="empty">没有匹配「' + esc(q) + '」的模型。</div>';
+  host.innerHTML = html;
+}
+
+$('#models-host') && $('#models-host').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-act="copy-model"]');
+  if (!btn) return;
+  await call('copy', { text: btn.dataset.model || '' });
+  banner('success', '已复制模型 ID：' + (btn.dataset.model || ''));
+});
+
+/* ---------- 模型清单：Codex 目录管理区 ---------- */
+
+function renderModelsAdmin(all) {
+  const host = $('#models-admin-host');
+  if (!host) return;
+  const admin = state.modelsAdmin || {};
+  const entries = state.models || [];
+  const codex = (state.hostModelsOverview || {}).codex || {};
+  let html = '<h2>Codex 模型目录管理</h2>' +
+    '<div class="small">目录文件：<code class="mono">' + esc(codex.path || admin.catalogPath || '-') + '</code>　·　' +
+    '共 ' + (admin.total || entries.length || 0) + ' 条，网关条目 ' + (admin.gateway || 0) + ' 条。' +
+    '“菜单可见”决定该条目是否出现在 Codex 顶部模型选择器里。</div>';
+  html += '<div style="margin-top:8px"><label class="mini-check"><input type="checkbox" id="models-show-all"' +
+    (all ? ' checked' : '') + '><span>显示 Codex 官方条目（默认只看网关条目）</span></label></div>';
+  html += '<div style="margin-top:10px"><button class="btn" id="btn-model-add">＋ 新增网关模型</button>' +
+    '<span class="small dim" style="margin-left:8px">Slug 必须是网关侧真实的模型名（例如 ark/DeepSeek-V4.1-Flash）</span></div>';
+  if (entries.length) {
+    html += '<div style="margin-top:10px">';
+    entries.forEach((m) => {
+      html += '<div class="key-row">' +
+        '<span class="status ' + (m.inPicker ? 's-valid' : 's-unchecked') + '"></span>' +
+        '<div class="key-main">' +
+          '<div class="key-title"><span class="key-label">' + esc(m.displayName) + '</span>' +
+          '<span class="chip' + (m.isGateway ? ' warn' : '') + '">' + esc(m.source || (m.isGateway ? '公司网关' : 'Codex 官方')) + '</span>' +
+          '<span class="chip">' + (m.inPicker ? '菜单可见' : '已隐藏') + '</span></div>' +
+          '<div class="key-meta"><code>' + esc(m.slug) + '</code></div>' +
+          (m.description ? '<div class="small dim" style="margin-top:3px">' + esc(m.description) + '</div>' : '') +
+        '</div>' +
+        '<button class="btn small" data-model-toggle="' + esc(m.slug) + '" data-in-picker="' + (m.inPicker ? '1' : '0') + '">' +
+          (m.inPicker ? '隐藏' : '显示') + '</button>' +
+        (m.isGateway ? '<button class="btn small danger" data-model-rm="' + esc(m.slug) + '">删除</button>' : '') +
+        '</div>';
+    });
+    html += '</div>';
+  }
   host.innerHTML = html;
 
+  const allSwitch = $('#models-show-all');
+  if (allSwitch) {
+    allSwitch.addEventListener('change', () => loadModelsAdmin(allSwitch.checked));
+  }
+  const addBtn = $('#btn-model-add');
+  if (addBtn) {
+    addBtn.addEventListener('click', async () => {
+      const slug = prompt('网关侧真实模型名（例如 ark/DeepSeek-V4.1-Flash）');
+      if (!slug) return;
+      const name = prompt('Codex 菜单里的显示名（例如 DeepSeek V4.1（公司网关））', slug + '（公司网关）');
+      if (!name) return;
+      try {
+        const res = await call('addModel', { slug: slug, name: name, inPicker: true });
+        banner(res.added ? 'success' : 'error', res.added ? '已新增 ' + slug + '，重启 Codex 后出现在顶部菜单' : '该 slug 已存在：' + slug);
+        loadModels();
+      } catch (e) {
+        banner('error', '新增失败：' + e.message);
+      }
+    });
+  }
   host.querySelectorAll('[data-model-toggle]').forEach((el) => {
     el.addEventListener('click', async () => {
       const slug = el.dataset.modelToggle;
@@ -1329,23 +2124,25 @@ function renderModels() {
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  const addBtn = $('#btn-model-add');
-  if (addBtn) {
-    addBtn.addEventListener('click', async () => {
-      const slug = prompt('网关侧真实模型名（例如 ark/DeepSeek-V4.1-Flash）');
-      if (!slug) return;
-      const name = prompt('Codex 菜单里的显示名（例如 DeepSeek V4.1（公司网关））', slug + '（公司网关）');
-      if (!name) return;
-      try {
-        const res = await call('addModel', { slug: slug, name: name, inPicker: true });
-        banner(res.added ? 'success' : 'error', res.added ? '已新增 ' + slug + '，重启 Codex 后出现在顶部菜单' : '该 slug 已存在：' + slug);
-        loadModels();
-      } catch (e) {
-        banner('error', '新增失败：' + e.message);
-      }
-    });
+/// 只重渲染管理区（勾选「显示全部」时不必重跑整个页面桥接）
+async function loadModelsAdmin(all) {
+  try {
+    const data = await call('models', { all: !!all });
+    state.models = data.models || [];
+    state.modelsAdmin = data.overview || {};
+  } catch (e) {
+    banner('error', '读取 Codex 模型目录失败：' + e.message);
   }
-  const allSwitch = $('#models-show-all');
-  if (allSwitch) allSwitch.addEventListener('change', loadModels);
-});
+  renderModelsAdmin(all);
+}
+
+// 跨宿主总览折叠区：展开时才加载（闭合性 + 不打扰首屏）。
+
+// 注：原「模型清单」页的 #models-filter 搜索框已随页面合并移除；
+// 总览内的搜索改由密钥页统一搜索框承担（格式塔：一个页面一个搜索入口）。
+const keysOverviewFold = $('#keys-overview');
+if (keysOverviewFold) {
+  keysOverviewFold.addEventListener('toggle', () => {
+    if (keysOverviewFold.open) loadModels();
+  });
+}

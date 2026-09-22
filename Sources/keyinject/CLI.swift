@@ -34,6 +34,45 @@ enum Out {
 
 func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
 
+/// 只到日期（模型发布时间精确到天即可，展示到秒属虚假精度）
+func shortDate(_ date: Date) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd"
+    return f.string(from: date)
+}
+
+/// 模型三维度里的时间维度：只在协议真的给了字段时才输出，缺席即缺席
+func metadataJSON(_ meta: ModelMetadata?) -> [String: Any] {
+    guard let meta else { return [:] }
+    var out: [String: Any] = [:]
+    if let published = meta.publishedAt { out["publishedAt"] = iso(published) }
+    if let source = meta.publishedSource { out["publishedSource"] = source }
+    if let tag = meta.versionTag { out["versionTag"] = tag }
+    if let shutdown = meta.shutdownDate { out["shutdownDate"] = shutdown }
+    return out
+}
+
+/// 模型三维度里的额度维度：**只有协议提供时才有值**（当前实测仅 DeepSeek）
+///
+/// `supported = false` 与 `null` 语义不同：
+/// - `null`：该厂商预设里没有余额端点，本工具**没有发起**请求；
+/// - `supported = false`：发了但明确不可得／未配置。
+/// 界面与脚本据此区分「不提供」和「取不到」，不会把缺数据误读成余额为零。
+func balanceJSON(_ balance: BalanceInfo?) -> Any {
+    guard let balance else { return NSNull() }
+    return [
+        "supported": balance.supported,
+        "available": balance.isAvailable.map { $0 as Any } ?? NSNull(),
+        "summary": balance.summary,
+        "endpoint": balance.endpoint,
+        "httpStatus": balance.httpStatus,
+        "note": balance.note,
+        "fetchedAt": iso(balance.fetchedAt),
+        "entries": balance.entries.map { ["currency": $0.currency, "total": $0.total,
+                                          "granted": $0.granted, "toppedUp": $0.toppedUp] }
+    ]
+}
+
 func fail(_ message: String, code: Int32 = 1) -> Never {
     Out.error(message)
     if Out.jsonMode { Out.json(["ok": false, "error": message]) }
@@ -86,7 +125,7 @@ struct Args {
 struct KeyInjectCLI {
 
     static let helpText = """
-    keyinject — AI API Key 管理与配置注入器（KeyInjector CLI）
+    keyinject — AI API Key 账号管理器（KeyInjector CLI）
 
     用法：
       keyinject <子命令> [参数...]
@@ -95,12 +134,14 @@ struct KeyInjectCLI {
       info                              显示数据目录、密钥后端与审计文件位置
       providers                         列出内置厂商目录
       targets                           列出可注入落点
-      keys                              列出已保存的密钥（仅掩码与指纹）
+      keys                              按 key 别名分区列出密钥（可用模型优先取缓存，不联网）
+      keys --grouped [--json]           显式要求分区输出（含分区计数，便于脚本消费）
       keys add                          新增密钥
           --provider <厂商id> --label <别名> (--secret <明文> | --secret-stdin | --secret-env <变量名>)
           [--priority <数值>] [--tags a,b] [--note <备注>]
       keys rm --id <密钥id>             删除密钥（同时清除钥匙串明文）
       keys enable|disable --id <密钥id> 启用 / 禁用密钥
+      key show --id <密钥id> [--probe]  单把密钥详情：可用模型 + 注入落点 + 审计摘要（--probe 先联网实测）
       inject                            生成注入计划（**默认只预览**）
           --target <落点id> --key <密钥id> [--file <路径>] [--json-path a.b.c]
           [--section <区块>] [--item-key <键名>] [--yes] [--show-secret]
@@ -114,10 +155,19 @@ struct KeyInjectCLI {
       gateway watch [--interval 10]     常驻守护：定期体检并自动修复路由（Ctrl-C 退出）
       gateway install-agent [--interval 10]   安装 launchd 常驻守护（开机自启，可 uninstall-agent 卸载）
       gateway uninstall-agent           卸载 launchd 常驻守护
+      gateway switch --model <模型名> [--yes]
+                                        一键切换 Codex 当前使用的网关模型（默认 dry-run）
       models list [--all]               列出模型目录条目（默认只看公司网关模型，含来源与菜单可见性）
+      models probe --id <密钥id>        识别该密钥可提供的模型：优先探测其端点 /models，失败自动降级
+      models probe --all                对所有密钥执行一次模型识别（显式联网动作，不做后台轮询）
       models add --slug <模型名> --name <菜单显示名> [--desc <说明>] [--hidden] [--yes]
       models show|hide --slug <模型名>   在 Codex 顶部菜单中显示 / 隐藏该模型
       models rm --slug <模型名>          从目录删除公司网关模型（官方条目不可删）
+      hosts list                        跨宿主模型清单总览（DSH 设置文件 + Codex 网关目录，按模型身份去重）
+      hosts keys                        列出每个密钥供给了哪些宿主模型（凭据键名 / 端点两种依据）
+      sync                              把网关声明的模型清单同步到 DSH 与 Codex（默认 dry-run）
+      sync --yes                        落盘同步（每个目标写入前自动备份）
+      sync 可覆盖路径：--gateway-config <路径> --dsh-settings <路径> --codex-catalog <路径>
 
     通用参数：
       --json                            以 JSON 输出（便于 DSH 会话解析）
@@ -146,7 +196,7 @@ struct KeyInjectCLI {
         }
         if command == "version" || command == "--version" {
             if Out.jsonMode { Out.json(["ok": true, "name": AppVersion.productName, "version": AppVersion.current]) }
-            else { print("KeyInjector CLI v\(AppVersion.current)") }
+            else { print("\(AppVersion.productName) CLI v\(AppVersion.current)") }
             exit(0)
         }
 
@@ -162,13 +212,16 @@ struct KeyInjectCLI {
         case "providers":           runProviders(service)
         case "targets":             runTargets(service)
         case "keys":                runKeys(service, args)
+        case "key":                 await runKey(service, args)
         case "inject":              runInject(service, args)
         case "rollback":            runRollback(service, args)
         case "check":               await runCheck(service, args)
         case "audit":               runAudit(service, args)
         case "config":              runConfig(service, args)
         case "gateway":             runGateway(service, args)
-        case "models":              runModels(service, args)
+        case "models":              await runModels(service, args)
+        case "hosts":               runHosts(service, args)
+        case "sync":                runSync(service, args)
         default:
             fail("未知子命令：\(command)（运行 keyinject --help 查看用法）")
         }
@@ -302,28 +355,197 @@ struct KeyInjectCLI {
 
         default:
             do {
-                let keys = try service.listKeys()
+                // 用 listKeysWithModels：密钥列表同时回答「这个 Key 供给了哪些宿主模型」。
+                // --grouped 时再按 key 别名分区，并附上已缓存的「可提供模型」（只读，不联网）。
+                let grouped = args.flag("grouped")
+                let keys = try service.listKeysWithModels()
+                func cachedModelsJSON(_ k: KeyRecord) -> Any {
+                    guard let cached = service.cachedDiscovery(for: k) else { return NSNull() }
+                    return ["probed": cached.probed, "endpoint": cached.endpoint, "note": cached.note,
+                            "sourceLabel": cached.sourceLabel, "fetchedAt": iso(cached.fetchedAt),
+                            // REQ-024：额度与时间两个维度随缓存的识别结果一起返回
+                            "balance": balanceJSON(cached.balance),
+                            "models": cached.normalizedModels.map { m -> [String: Any] in
+                                var item: [String: Any] = ["modelID": m.modelID, "source": m.source.rawValue,
+                                                           "sourceLabel": m.source.label,
+                                                           "confidence": m.source.confidence, "evidence": m.evidence,
+                                                           "host": m.host?.rawValue ?? ""]
+                                item.merge(metadataJSON(m.metadata)) { _, new in new }
+                                return item
+                            }]
+                }
                 if Out.jsonMode {
                     let list = keys.map { k -> [String: Any] in
                         ["id": k.id, "providerID": k.providerID, "providerName": service.providers.name(of: k.providerID),
                          "label": k.label, "hint": k.hint, "fingerprint": k.fingerprint, "enabled": k.enabled,
                          "priority": k.priority, "tags": k.tags, "note": k.note,
+                         "modelBindings": k.modelBindings.map { ["modelID": $0.modelID, "displayName": $0.displayName,
+                                                                    "host": $0.host.rawValue, "owner": $0.owner,
+                                                                    "credentialKey": $0.credentialKey,
+                                                                    "endpoint": $0.endpoint, "matchedBy": $0.matchedBy,
+                                                                    "inMenu": $0.inMenu] },
+                         "discovery": cachedModelsJSON(k),
                          "createdAt": iso(k.createdAt), "updatedAt": iso(k.updatedAt),
                          "lastCheck": k.lastCheck.map { ["status": $0.status.rawValue, "label": $0.status.label, "message": $0.message, "checkedAt": iso($0.checkedAt), "httpStatus": $0.httpStatus ?? 0, "latencyMS": $0.latencyMS ?? 0] } as Any]
                     }
-                    Out.json(["ok": true, "count": keys.count, "storeBackend": service.vault.backendName, "keys": list])
+                    var payload: [String: Any] = ["ok": true, "count": keys.count,
+                                                  "storeBackend": service.vault.backendName, "keys": list]
+                    if grouped {
+                        payload["groups"] = try service.keyGroups().map { group -> [String: Any] in
+                            ["label": group.label, "modelCount": group.modelCount,
+                             "keyIDs": group.records.map { $0.id }]
+                        }
+                    }
+                    Out.json(payload)
                     return
                 }
                 Out.box("密钥库（\(keys.count) 条 · 后端：\(service.vault.backendName)）")
                 if keys.isEmpty { print("（空。用 `keyinject keys add --provider deepseek --label 主力 --secret-stdin` 添加）") }
-                for k in keys {
-                    let status = k.lastCheck?.status.label ?? "未探测"
-                    print("• [\(k.enabled ? "启用" : "禁用")] \(k.label)  ·  \(service.providers.name(of: k.providerID))")
-                    print("    id: \(k.id)")
-                    print("    掩码 \(k.hint)  指纹 \(k.fingerprint)  优先级 \(k.priority)  探测: \(status)")
+                let groups = try service.keyGroups()
+                for group in groups {
+                    for k in group.records {
+                        let status = k.lastCheck?.status.label ?? "未探测"
+                        // 分区标题 = key 别名（一把 key 一个分区）
+                        print("▸ \(group.label)\(group.records.count > 1 ? "（\(group.records.count) 把）" : "")")
+                        print("• [\(k.enabled ? "启用" : "禁用")] \(service.providers.name(of: k.providerID))")
+                        print("    id: \(k.id)")
+                        print("    掩码 \(k.hint)  指纹 \(k.fingerprint)  优先级 \(k.priority)  探测: \(status)")
+                        if let cached = service.cachedDiscovery(for: k) {
+                            let models = cached.normalizedModels
+                            print("    可提供模型 \(models.count) 个（来源：\(cached.sourceLabel)）：")
+                            for m in models.prefix(12) {
+                                var line = "      - \(m.modelID)  [\(m.source.label)] \(m.evidence)"
+                                if let published = m.metadata?.publishedAt {
+                                    line += "  更新时间 \(shortDate(published))"
+                                }
+                                print(line)
+                            }
+                            if models.count > 12 { print("      … 其余 \(models.count - 12) 个见 `keyinject key show <id>`") }
+                            if let balance = cached.balance {
+                                print("    账户额度: \(balance.supported ? balance.summary : "该协议不提供（\(balance.note)）")")
+                            }
+                        } else if !k.modelBindings.isEmpty {
+                            let models = k.modelBindings.map { "\($0.host.label)/\($0.modelID)" }.joined(separator: "、")
+                            print("    供给模型（宿主映射，未探测）: \(models)")
+                            print("    提示: 运行 `keyinject models probe --id \(k.id)` 从该 Key 端点实测")
+                        } else {
+                            print("    尚无模型信息：可运行 `keyinject models probe --id \(k.id)`")
+                        }
+                    }
                 }
             } catch { fail("\(error)") }
         }
+    }
+
+    // MARK: key show（单把密钥详情）
+
+    static func runKey(_ service: KeyInjectorService, _ args: Args) async {
+        let action = args.rest.first ?? "show"
+        guard action == "show" else {
+            fail("用法：keyinject key show --id <密钥id> [--probe] [--json]")
+        }
+        guard let id = args.value("id") else { fail("缺少 --id 参数") }
+
+        do {
+            if args.flag("probe") {
+                let result = try await service.discoverModels(forKeyID: id)
+                if !Out.jsonMode {
+                    Out.box("模型发现")
+                    print("来源: \(result.sourceLabel)   端点: \(result.endpoint.isEmpty ? "—" : result.endpoint)")
+                    print("说明: \(result.note)")
+                }
+            }
+            let detail = try service.keyDetail(id: id)
+            let models = detail.availableModels
+            if Out.jsonMode {
+                var out: [String: Any] = [
+                    "ok": true,
+                    "id": detail.record.id,
+                    "label": detail.record.label,
+                    "providerID": detail.record.providerID,
+                    "enabled": detail.record.enabled,
+                    "priority": detail.record.priority,
+                    "hint": detail.record.hint,
+                    "fingerprint": detail.record.fingerprint,
+                    "baseURL": detail.record.baseURL ?? "",
+                    "probeable": detail.probeable,
+                    "availableModels": models.map { m -> [String: Any] in
+                        var item: [String: Any] = ["modelID": m.modelID, "displayName": m.displayName,
+                                                   "source": m.source.rawValue,
+                                                   "sourceLabel": m.source.label, "confidence": m.source.confidence,
+                                                   "evidence": m.evidence, "host": m.host?.rawValue ?? "",
+                                                   "owner": m.owner, "inMenu": m.inMenu,
+                                                   "credentialKey": m.credentialKey, "endpoint": m.endpoint]
+                        item.merge(metadataJSON(m.metadata)) { _, new in new }
+                        return item
+                    },
+                    "locations": detail.locations.map { l -> [String: Any] in
+                        ["targetID": l.targetID, "targetName": l.targetName, "filePath": l.filePath,
+                         "itemKey": l.itemKey, "lastInjectedAt": iso(l.lastInjectedAt)]
+                    },
+                    "audit": detail.auditEntries.map { ["id": $0.id, "action": $0.action.rawValue,
+                                                         "actionLabel": $0.action.label, "result": $0.result,
+                                                         "message": $0.message, "timestamp": iso($0.timestamp)] }
+                ]
+                if let d = detail.discovery {
+                    // 与 GUI / keys --grouped 保持同一口径：modelCount 是去重后的数量
+                    out["discovery"] = ["probed": d.probed, "endpoint": d.endpoint, "note": d.note,
+                                        "sourceLabel": d.sourceLabel, "fetchedAt": iso(d.fetchedAt),
+                                        "httpStatus": d.httpStatus, "modelCount": d.modelCount,
+                                        "balance": balanceJSON(d.balance),
+                                        "models": d.normalizedModels.map { m -> [String: Any] in
+                                            var item: [String: Any] = ["modelID": m.modelID, "displayName": m.displayName,
+                                                                       "source": m.source.rawValue, "sourceLabel": m.source.label,
+                                                                       "confidence": m.source.confidence, "evidence": m.evidence,
+                                                                       "host": m.host?.rawValue ?? "", "owner": m.owner,
+                                                                       "inMenu": m.inMenu, "credentialKey": m.credentialKey,
+                                                                       "endpoint": m.endpoint]
+                                            item.merge(metadataJSON(m.metadata)) { _, new in new }
+                                            return item
+                                        }]
+                } else {
+                    out["discovery"] = NSNull()
+                }
+                Out.json(out)
+                return
+            }
+            Out.box("密钥详情：\(detail.record.label)")
+            print("厂商      : \(service.providers.name(of: detail.record.providerID))")
+            print("状态      : \(detail.record.enabled ? "启用" : "禁用")   优先级 \(detail.record.priority)")
+            print("掩码/指纹 : \(detail.record.hint)  \(detail.record.fingerprint)")
+            print("端点      : \(detail.record.baseURL ?? "（厂商默认）")")
+            print("探测能力  : \(detail.probeable ? "具备（可拉取 /models）" : "无端点，无法探测")")
+            if let d = detail.discovery {
+                print("模型来源  : \(d.sourceLabel)   更新于 \(iso(d.fetchedAt))")
+                print("发现说明  : \(d.note)")
+                if let balance = d.balance {
+                    print("账户额度  : \(balance.supported ? balance.summary : "该协议不提供（\(balance.note)）")")
+                }
+            } else {
+                print("模型来源  : 尚未探测（运行 keyinject models probe --id \(detail.record.id)）")
+            }
+            print("")
+            print("可提供模型（\(models.count) 个）：")
+            for m in models {
+                let host = m.host.map { " \($0.label)" } ?? ""
+                print("  [\(m.source.label)] \(m.modelID)\(host)  — \(m.evidence)")
+                if let meta = m.metadata {
+                    var bits: [String] = []
+                    if let published = meta.publishedAt { bits.append("更新时间 \(shortDate(published))") }
+                    if let tag = meta.versionTag { bits.append("版本 \(tag)") }
+                    if let shutdown = meta.shutdownDate { bits.append("下线 \(shutdown)") }
+                    if !bits.isEmpty { print("      " + bits.joined(separator: " · ")) }
+                }
+            }
+            if models.isEmpty { print("  （暂无。端点未探测成功且宿主未声明绑定该 Key 的模型）") }
+            print("")
+            print("注入落点（\(detail.locations.count) 个）：")
+            for l in detail.locations {
+                print("  · \(l.targetName)（\(l.targetID)）键名 \(l.itemKey)  最近 \(iso(l.lastInjectedAt))")
+                print("    \(l.filePath)")
+            }
+            if detail.locations.isEmpty { print("  （尚未注入到任何落点）") }
+        } catch { fail("\(error)") }
     }
 
     // MARK: inject
@@ -385,6 +607,12 @@ struct KeyInjectCLI {
                 print("目标文件  : \(plan.resolvedPath ?? "—")\(plan.existedBefore ? "" : "  ⚠️ 尚不存在，将新建")")
                 print("注入键名  : \(plan.itemKey)")
                 print("使用密钥  : \(plan.keyRecord.label)  掩码 \(plan.keyRecord.hint)  指纹 \(plan.keyRecord.fingerprint)")
+                if !plan.suppliedModels.isEmpty {
+                    // dry-run 阶段就把「这个 Key 供给了哪些宿主模型」摆出来，
+                    // 避免出现「注入成功但宿主菜单里对不上」的困惑。
+                    let summary = plan.suppliedModels.map { "\($0.host.label):\($0.modelID)" }.joined(separator: "、")
+                    print("供给模型  : \(summary)")
+                }
                 print("")
                 for line in diffLines { print("  " + line.rendered) }
                 if plan.target.format == .none {
@@ -588,12 +816,251 @@ struct KeyInjectCLI {
         }
     }
 
-    // MARK: models（Codex 模型目录）
+    // MARK: hosts（跨宿主模型清单 + 密钥供给关系）
 
-    static func runModels(_ service: KeyInjectorService, _ args: Args) {
+    /// 列出 DSH 与 Codex 两个宿主的模型清单，并显示每个模型由哪个密钥供给。
+    ///
+    /// 与 `keyinject models` 的分工：`models` 面向 Codex 目录的**写入**（add/show/hide/rm），
+    /// `hosts` 面向两个宿主的**只读总览**，回答「这些模型是从哪来的、是谁在供」。
+    static func runHosts(_ service: KeyInjectorService, _ args: Args) {
+        let action = args.rest.first ?? "list"
+
+        switch action {
+        case "list":
+            let groups = service.hostModelGroups()
+            let overview = service.hostModelOverview()
+            if Out.jsonMode {
+                Out.json([
+                    "ok": true,
+                    "overview": overview,
+                    "models": groups.map { group in
+                        [
+                            "normalizedID": group.normalizedID,
+                            "displayName": group.displayName,
+                            "aliases": group.aliases,
+                            "hosts": group.hosts.map { $0.rawValue },
+                            "records": group.records.map { record in
+                                ["id": record.id, "host": record.host.rawValue, "owner": record.owner,
+                                 "credentialKey": record.credentialKey, "endpoint": record.endpoint,
+                                 "inMenu": record.inMenu]
+                            }
+                        ] as [String: Any]
+                    }
+                ])
+                return
+            }
+            Out.box("宿主模型清单总览（去重后 \(groups.count) 个模型 / 共 \(overview["total"] ?? 0) 条记录）")
+            print("DSH 宿主设置 : \(overview["dshSettingsPath"] ?? "-")")
+            print("             存在=\((overview["dshSettingsExists"] as? Bool ?? false) ? "是" : "否")  声明模型=\(overview["dshCount"] ?? 0)  凭据已配置=\(overview["dshCredentialConfigured"] ?? 0)/\(overview["dshDeclared"] ?? 0)")
+            print("Codex 目录   : \(overview["codexCatalogPath"] ?? "-")")
+            print("             网关条目=\(overview["codexGatewayCount"] ?? 0)  官方条目=\(overview["codexOfficialCount"] ?? 0)")
+            print("Codex 网关端点: \(overview["codexEndpoint"] ?? "(未声明)")")
+            print("Codex 当前路由: model=\(overview["codexConfigModel"] ?? "(未设置)") → provider=\(overview["codexConfigProvider"] ?? "(未设置)")  \(((overview["codexRoutingHealthy"] as? Bool) ?? true) ? "正常" : "⚠️ 异常")")
+            print("")
+            for group in groups {
+                let hosts = group.hosts.map { $0.label }.joined(separator: " + ")
+                print("• \(group.displayName)  [\(hosts)]")
+                for record in group.records {
+                    let cred = record.credentialKey.isEmpty ? "凭据=网关自持" : "凭据键=\(record.credentialKey)"
+                    print("    - \(record.host.label): \(record.id)  (\(cred)\(record.endpoint.isEmpty ? "" : "  端点=\(record.endpoint)"))")
+                }
+            }
+            print("\n提示：`keyinject hosts keys` 查看每个密钥供给了哪些模型。")
+
+        case "keys":
+            let records = (try? service.listKeysWithModels()) ?? []
+            if Out.jsonMode {
+                Out.json([
+                    "ok": true,
+                    "keys": records.map { record in
+                        ["id": record.id, "label": record.label, "providerID": record.providerID,
+                         "models": record.modelBindings.map { ["modelID": $0.modelID, "host": $0.host.rawValue,
+                                                                  "displayName": $0.displayName, "matchedBy": $0.matchedBy] }]
+                    }
+                ])
+                return
+            }
+            Out.box("密钥 → 模型 供给关系")
+            if records.isEmpty { print("密钥库为空。"); return }
+            for record in records {
+                let models = record.modelBindings
+                print("• \(record.label)  [\(record.providerID)]")
+                if models.isEmpty {
+                    print("    （未绑定任何宿主模型：凭据键名与端点都没命中宿主声明）")
+                }
+                for binding in models {
+                    let menu = binding.inMenu ? "菜单可见" : "已隐藏"
+                    print("    - \(binding.host.label) · \(binding.modelID)  (\(menu)，依据：\(binding.matchedBy))")
+                }
+            }
+
+        default:
+            fail("用法：keyinject hosts [list | keys | gateway]")
+        }
+    }
+
+    // MARK: sync（网关清单 → 两个客户端）
+
+    /// 把网关声明的模型清单同步到 DSH 与 Codex 客户端配置。
+    ///
+    /// 默认 dry-run（只出差异，不落盘）：与注入流程同一条原则——先看再写。
+    static func runSync(_ service: KeyInjectorService, _ args: Args) {
+        let apply = args.flag("yes") || args.flag("apply")
+        let gatewayPath = args.value("gateway-config") ?? GatewayConfig.defaultPath
+        let dshPath = args.value("dsh-settings") ?? DshModelCatalog.defaultSettingsPath
+        let codexPath = args.value("codex-catalog") ?? CodexCatalogStore.defaultPath
+        // 默认 merge（只增不减）。--prune 才改为完全对齐网关声明，
+        // 避免「网关只声明了两条线路」时把用户自己在宿主里加的模型删掉。
+        let mode: HostConfigSync.MergeMode = args.flag("prune") ? .replace : .merge
+
+        let plan = apply
+            ? service.applyHostConfigSync(gatewayPath: gatewayPath, dshSettingsPath: dshPath, codexCatalogPath: codexPath, mergeMode: mode)
+            : service.planHostConfigSync(gatewayPath: gatewayPath, dshSettingsPath: dshPath, codexCatalogPath: codexPath, mergeMode: mode)
+
+        if Out.jsonMode {
+            Out.json([
+                "ok": plan.dsh.succeeded && plan.codex.succeeded,
+                "applied": apply,
+                "mergeMode": mode.rawValue,
+                "gateway": [
+                    "sourcePath": plan.gateway.sourcePath,
+                    "baseURL": plan.gateway.baseURL,
+                    "models": plan.gateway.upstreamModels,
+                    "routes": plan.gateway.routes.map { ["route": $0.route, "upstreamModel": $0.upstreamModel] }
+                ],
+                "targets": [
+                    SyncJSON.target(plan.dsh),
+                    SyncJSON.target(plan.codex)
+                ]
+            ])
+            return
+        }
+
+        Out.box(apply ? "同步网关清单 → 客户端（已落盘）" : "同步网关清单 → 客户端（dry-run，未写入）")
+        print("网关事实源 : \(plan.gateway.sourcePath)")
+        if plan.gateway.isUsable {
+            print("             地址=\(plan.gateway.baseURL)  声明模型=\(plan.gateway.upstreamModels.count)")
+            for route in plan.gateway.routes {
+                print("             · \(route.route) → \(route.upstreamModel)")
+            }
+        } else {
+            print("             ⚠️ 读不到网关声明的模型清单，已跳过全部同步")
+        }
+        print("")
+        SyncJSON.printTarget("DSH 设置", plan.dsh)
+        SyncJSON.printTarget("Codex 目录", plan.codex)
+
+        if !apply, plan.anyChanged {
+            print("\n提示：确认无误后执行 `keyinject sync --yes` 落盘（每个目标写入前自动备份）。")
+        } else if apply {
+            let backups = [plan.dsh.backupPath, plan.codex.backupPath].compactMap { $0 }
+            if !backups.isEmpty { print("\n已备份：") ; backups.forEach { print("  \($0)") } }
+            if plan.allConsistent { print("\n两个客户端均已与网关一致，未写入任何内容。") }
+        } else {
+            print("\n两个客户端均已与网关一致，未写入任何内容。")
+        }
+    }
+
+    enum SyncJSON {
+        static func target(_ result: HostConfigSync.Result) -> [String: Any] {
+            var payload: [String: Any] = [
+                "path": result.targetPath,
+                "changed": result.changed,
+                "summary": result.summary,
+                "notes": result.notes
+            ]
+            if let failure = result.failure { payload["failure"] = failure }
+            if let backup = result.backupPath { payload["backupPath"] = backup }
+            return payload
+        }
+
+        static func printTarget(_ label: String, _ result: HostConfigSync.Result) {
+            print("\(label) : \(result.targetPath)")
+            let mark = result.failure != nil ? "⚠️ " : (result.changed ? "✏️ " : "✅ ")
+            print("             \(mark)\(result.summary)")
+            for note in result.notes { print("                · \(note)") }
+            if let failure = result.failure { print("                ⚠️ \(failure)") }
+        }
+    }
+
+    // MARK: models（Codex 模型目录 + 密钥可用模型探测）
+
+    static func runModels(_ service: KeyInjectorService, _ args: Args) async {
         let action = args.rest.first ?? "list"
         do {
             switch action {
+            case "probe":
+                // 模型发现：显式联网动作，探测该 Key 端点的 /models，失败自动降级
+                let id = args.value("id")
+                let all = args.flag("all")
+                if id == nil && !all { fail("用法：keyinject models probe (--id <密钥id> | --all) [--json]") }
+                if let id {
+                    let result = try await service.discoverModels(forKeyID: id)
+                    if Out.jsonMode {
+                        Out.json(["ok": true, "id": id, "probed": result.probed, "endpoint": result.endpoint,
+                                  "httpStatus": result.httpStatus, "note": result.note,
+                                  "sourceLabel": result.sourceLabel, "fetchedAt": iso(result.fetchedAt),
+                                  "balance": balanceJSON(result.balance),
+                                  "models": result.normalizedModels.map { m -> [String: Any] in
+                                      var item: [String: Any] = ["modelID": m.modelID, "source": m.source.rawValue, "sourceLabel": m.source.label,
+                                                                 "confidence": m.source.confidence, "evidence": m.evidence,
+                                                                 "host": m.host?.rawValue ?? ""]
+                                      // REQ-024：三维度里的时间维度原样交给脚本，缺席即缺席（不做兜底填充）
+                                      if let meta = m.metadata {
+                                          if let published = meta.publishedAt { item["publishedAt"] = iso(published) }
+                                          if let src = meta.publishedSource { item["publishedSource"] = src }
+                                          if let tag = meta.versionTag { item["versionTag"] = tag }
+                                          if let shutdown = meta.shutdownDate { item["shutdownDate"] = shutdown }
+                                      }
+                                      return item
+                                  }])
+                        return
+                    }
+                    let label = (try? service.listKeys())?.first { $0.id == id }?.label ?? id
+                    Out.box("模型发现（\(label)）")
+                    print("来源: \(result.sourceLabel)")
+                    print("端点: \(result.endpoint.isEmpty ? "—" : result.endpoint)")
+                    print("说明: \(result.note)")
+                    if let balance = result.balance {
+                        print(balance.supported
+                              ? "额度: \(balance.summary)\(balance.endpoint.isEmpty ? "" : "（\(balance.endpoint)）")"
+                              : "额度: 该协议不提供（\(balance.note)）")
+                    }
+                    print("")
+                    for m in result.normalizedModels {
+                        print("  [\(m.source.label)] \(m.modelID)  — \(m.evidence)")
+                        if let meta = m.metadata {
+                            var bits: [String] = []
+                            if let published = meta.publishedAt { bits.append("更新时间 \(shortDate(published))") }
+                            if let tag = meta.versionTag { bits.append("版本 \(tag)") }
+                            if let shutdown = meta.shutdownDate { bits.append("下线 \(shutdown)") }
+                            if !bits.isEmpty { print("      " + bits.joined(separator: " · ")) }
+                        }
+                    }
+                    if result.normalizedModels.isEmpty { print("  （没有识别到任何模型）") }
+                    return
+                }
+                let results = try await service.discoverAllModels()
+                let keys = try service.listKeys()
+                if Out.jsonMode {
+                    var out: [String: Any] = [:]
+                    for (keyID, result) in results {
+                        out[keyID] = ["probed": result.probed, "endpoint": result.endpoint, "note": result.note,
+                                      "sourceLabel": result.sourceLabel, "modelCount": result.normalizedModels.count,
+                                      "models": result.normalizedModels.map { $0.modelID }]
+                    }
+                    Out.json(["ok": true, "total": results.count,
+                              "probed": results.values.filter { $0.probed }.count, "results": out])
+                    return
+                }
+                Out.box("批量模型发现（\(results.count) 把密钥）")
+                for key in keys {
+                    guard let result = results[key.id] else { continue }
+                    let mark = result.probed ? "✅" : "⚠️"
+                    print("\(mark) \(key.label)：\(result.sourceLabel) · \(result.normalizedModels.count) 个模型")
+                    print("    \(result.note)")
+                }
+
             case "list":
                 let includeOfficial = args.flag("all")
                 let entries = service.codexCatalogEntries(includeOfficial: includeOfficial)
@@ -651,7 +1118,7 @@ struct KeyInjectCLI {
                 print(removed ? "✅ 已从目录删除 \(slug)" : "❌ 未删除（不是公司网关条目或不存在）：\(slug)")
 
             default:
-                fail("用法：keyinject models [list [--all] | add | show | hide | rm]")
+                fail("用法：keyinject models [list [--all] | probe (--id <密钥id> | --all) | add | show | hide | rm]")
             }
         } catch { fail("\(error)") }
     }
@@ -709,6 +1176,45 @@ struct KeyInjectCLI {
                 }
             } catch { fail("\(error)") }
 
+        case "switch":
+            // 一键切换 Codex 当前使用的网关模型。
+            // 这是「Gemini 额度耗尽要手动换模型」这个维护点的最小代价替代：
+            // 不自动替你换（用户明确选择只告警），但把「换模型」从
+            // 「打开 Codex → 找菜单 → 选模型 → 确认 provider」压缩成一条命令。
+            let target = args.value("model") ?? ""
+            let available = GatewayConfig.declaredModels()
+            guard !available.isEmpty else {
+                fail("读不到网关声明的模型清单（\(GatewayConfig.defaultPath)），无法切换。")
+            }
+            let chosen = target.isEmpty ? (available.first ?? "") : target
+            guard !chosen.isEmpty else { fail("没有可切换的网关模型。") }
+            if !available.contains(chosen) {
+                print("⚠️ \(chosen) 不在网关声明的清单里；仍会写入，但网关可能拒绝该模型。")
+                print("   网关声明的模型：\(available.joined(separator: "、"))")
+            }
+            let dryRun = !args.flag("yes")
+            do {
+                let result = try service.switchCodexGatewayModel(to: chosen, configPath: configPath, dryRun: dryRun)
+                if Out.jsonMode {
+                    Out.json(["ok": true, "changed": result.changed, "dryRun": result.dryRun,
+                              "model": chosen, "provider": result.status.provider ?? "",
+                              "configPath": result.status.configPath,
+                              "backupPath": result.backupPath ?? ""])
+                    return
+                }
+                Out.box("切换 Codex 网关模型")
+                print("目标模型 : \(chosen)")
+                if !result.changed {
+                    print("✅ 已经是该模型，配置未变。")
+                } else if dryRun {
+                    print("（dry-run，未写入。确认后加 --yes 落盘）")
+                    if let preview = result.preview { print(preview) }
+                } else {
+                    print("✅ 已切换；原文件已备份：\(result.backupPath ?? "(无备份)")")
+                    print("   完全退出并重新打开 Codex 后生效。")
+                }
+            } catch { fail("\(error)") }
+
         case "watch":
             let interval = Double(args.value("interval") ?? "10") ?? 10
             runGatewayWatch(service, configPath: configPath, interval: max(2, interval), logPath: args.value("log"))
@@ -733,7 +1239,7 @@ struct KeyInjectCLI {
             } catch { fail("\(error)") }
 
         default:
-            fail("用法：keyinject gateway [check | repair [--yes] | watch | install-agent | uninstall-agent] [--config <config.toml 路径>]")
+            fail("用法：keyinject gateway [check | repair [--yes] | switch --model <模型名> [--yes] | watch | install-agent | uninstall-agent] [--config <config.toml 路径>]")
         }
     }
 }

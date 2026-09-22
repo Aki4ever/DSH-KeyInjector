@@ -71,10 +71,11 @@ public struct ProviderCatalog: Sendable {
             envKeys: ["DEEPSEEK_API_KEY"],
             baseURL: "https://api.deepseek.com",
             healthPath: "/models",
+            balancePath: "/user/balance",
             consoleURL: "https://platform.deepseek.com/api_keys",
             secretPrefixes: ["sk-"],
             authStyle: .bearer,
-            note: "OpenAI 兼容接口，DSH 宿主即读取 DEEPSEEK_API_KEY 环境变量。"
+            note: "OpenAI 兼容接口，DSH 宿主即读取 DEEPSEEK_API_KEY 环境变量。三家实测中唯一提供余额接口的厂商：GET /user/balance 返回 is_available 与分币种余额。模型清单本身不含任何时间字段，故「更新日期」维度显示为「该协议不提供」。"
         ),
         Provider(
             id: "google",
@@ -177,8 +178,8 @@ public struct TargetCatalog: Sendable {
             format: .yaml,
             filePath: "~/Library/Application Support/com.yeagoo.dsh-desktop/harness/.credentials.yaml",
             section: "refs",
-            itemKey: "DEEPSEEK_API_KEY",
-            note: "定点写入 DSH 桌面端凭据（.credentials.yaml 的 refs 区块），支持官方与各类中转网关 Key。注入后重启 DSH 生效。"
+            itemKey: "MIDPRO_API_KEY",
+            note: "定点写入 DSH 桌面端凭据（.credentials.yaml 的 refs 区块），支持官方与各类中转网关 Key。注入后重启 DSH 生效。注：DSH 真正读取的键名由 settings.yaml 的 llm-pi-ai.providers.*.apiKeyEnv 声明，本工具以宿主声明为准动态解析，此处仅是该落点无宿主配置时的回退值。"
         ),
         InjectionTarget(
             id: "codex-cli",

@@ -149,11 +149,55 @@ codex exec -m "ark/DeepSeek-V4.1-Flash" -c 'model_provider="codex_gateway"'
 
 ---
 
-## 模型清单从哪来（v1.3.0 起可视化）
+## 模型清单从哪来（v1.3.0 起可视化，v1.4.0 起覆盖两个宿主）
 
 用户疑问：「注入器只写入了公司 AI 综合密钥，并没有细分到模型，这些模型从哪来的？」
 
-答案：Codex 顶部模型菜单的唯一数据源是 `~/.codex/codex-gateway-models.json`（由
+**简短回答**：模型清单来自**两个宿主各自的配置**，注入器把密钥挂到模型上，而不是反过来。
+
+| 宿主 | 模型写在哪 | 凭据如何关联 |
+| --- | --- | --- |
+| DSH 桌面端 | `harness/settings.yaml` 的 `llm-pi-ai.providers.<id>.models` | 同处 `apiKeyEnv: MIDPRO_API_KEY` → `.credentials.yaml` 的 `refs` 区块 |
+| Codex 桌面端 | `~/.codex/codex-gateway-models.json`（由 `config.toml` 的 `model_catalog_json` 指向） | `[model_providers.codex_gateway].base_url` → 指向同一台网关的密钥 |
+
+### v1.3.0 的口径缺口（已在本版修正）
+
+v1.3.0 的「模型清单」页**只读** `codex-gateway-models.json`，因此 DSH 顶部菜单里的
+`DS/DeepSeek V4.1 Flash`、`gpt-6-astra`、`gpt-image-2.5` 等条目在注入器里完全看不到，
+用户自然会问「为什么这边显示的模型和我注入器里的对不上」。
+
+更隐蔽的是键名错配：`dsh-desktop` 落点当时静态登记 `itemKey: DEEPSEEK_API_KEY`，
+而 DSH 实际读取 `settings.yaml` 声明的 `MIDPRO_API_KEY`。注入器会「成功写入一个 DSH 根本不读的键名」，
+表现为**静默失效**——不报错，但宿主拿不到密钥。
+
+### v1.4.0 的修正
+
+1. **跨宿主模型清单**：`HostModelCatalog.swift` 同时读取两个宿主的配置，把模型读成同一形状。
+2. **模型身份归一**：`ModelIdentity.normalize` 剥掉 `ark/`、`ds/` 等命名空间前缀，
+   于是 `DS/DeepSeek V4.1 Flash` 与 `ark/DeepSeek-V4.1-Flash` 被识别为同一个模型。
+3. **密钥 ↔ 模型绑定**：两条依据（命中其一即绑定，都不命中则如实显示「未绑定」）：
+   - 凭据键名：宿主声明的 `apiKeyEnv` 命中该密钥的厂商环境变量名或落点键名；
+   - 端点地址：宿主的 `baseURL` 与该密钥自定义 Base URL 同源。
+4. **键名以宿主声明为权威**：`resolvedTargetItemKey` 优先返回宿主声明的键名，
+   落点目录的 `itemKey` 只作回退；dry-run 会明确提示差异。
+
+### 自查命令
+
+```bash
+keyinject hosts list     # 两个宿主的模型总览，含凭据键名与端点
+keyinject hosts keys     # 每个密钥供给了哪些模型、依据是什么
+keyinject keys           # 密钥列表，同时显示供给的模型
+keyinject inject --target dsh-desktop --key <id>   # dry-run 会打印实际写入的键名
+```
+
+> 反例边界：注入器**只读** `settings.yaml`，绝不改写它。该文件里还有 onboarding、
+> 权限预设、默认模型等大量非本工具所有的字段，任何「顺手规范化 YAML」的行为都会破坏用户配置。
+
+---
+
+## 旧的 Codex 单宿主说明（v1.3.0）
+
+Codex 顶部模型菜单的唯一数据源是 `~/.codex/codex-gateway-models.json`（由
 `config.toml` 的 `model_catalog_json` 指向）。该文件里混合了两类条目：
 
 | 来源 | 谁写入 | 例子 |
@@ -162,8 +206,8 @@ codex exec -m "ark/DeepSeek-V4.1-Flash" -c 'model_provider="codex_gateway"'
 | **公司网关条目** | 本工具的注入流程（`syncCodexModelCatalogIfAvailable`）与本机 codex-gateway（`write_model_catalog`） | DeepSeek V4.1（公司网关）、Gemini 3.8 Flash（公司网关） |
 
 也就是说：**网关模型条目确实来自你的 key 注入器**（以及同机的 codex-gateway），只是此前没有界面能看见，
-所以像「凭空多出来的模型」。v1.3.0 起在应用侧边栏新增「模型清单」页，逐条列出
-来源标签、slug、菜单可见性，并可新增 / 隐藏 / 删除；CLI 对应 `keyinject models list|add|show|hide|rm`。
+所以像「凭空多出来的模型」。v1.3.0 起在应用侧边栏新增「模型清单」页，v1.4.0 起扩展为跨宿主总览，
+CLI 对应 `keyinject hosts list|keys` 与 `keyinject models list|add|show|hide|rm`。
 
 ## 常驻守护（自动修复图 1 的故障）
 

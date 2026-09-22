@@ -148,10 +148,29 @@ public enum ContentPatcher {
         let keyPattern = "^[ \\t]*\(NSRegularExpression.escapedPattern(for: key))[ \\t]*:"
         let regex = try NSRegularExpression(pattern: keyPattern)
 
+        // 幂等护栏：YAML 里 `KEY: sk-xxx` 与 `KEY: "sk-xxx"` 是同一个值。
+        // 若只比较原始行文本，本工具会给一个「值没变、只是加了引号」的行制造假差异，
+        // 并让注入结果看起来像一次空操作写入。这里先把既有值的引号剥掉再比较。
+        func unquotedExistingValue(_ line: String) -> String {
+            guard let colon = line.firstIndex(of: ":") else { return "" }
+            var v = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            if let hash = v.firstIndex(of: "#"), !v.hasPrefix("\"") {
+                v = String(v[v.startIndex..<hash]).trimmingCharacters(in: .whitespaces)
+            }
+            if v.count >= 2, v.hasPrefix("\""), v.hasSuffix("\"") {
+                v = String(v.dropFirst().dropLast())
+            } else if v.count >= 2, v.hasPrefix("'"), v.hasSuffix("'") {
+                v = String(v.dropFirst().dropLast())
+            }
+            return v
+        }
+
         if rangeStart < rangeEnd {
             for idx in rangeStart..<rangeEnd {
                 let range = NSRange(lines[idx].startIndex..<lines[idx].endIndex, in: lines[idx])
                 if regex.firstMatch(in: lines[idx], options: [], range: range) != nil {
+                    // 值本就相同（忽略引号差异）时原样返回，避免「空操作注入」污染历史与备份
+                    if unquotedExistingValue(lines[idx]) == value { return content }
                     let existingIndent = String(lines[idx].prefix { $0 == " " || $0 == "\t" })
                     lines[idx] = "\(existingIndent.isEmpty ? indent : existingIndent)\(key): \(quoted)"
                     return lines.joined(separator: "\n") + "\n"
@@ -396,6 +415,8 @@ public struct InjectionPlan: Sendable {
     /// 是否被安全策略阻断
     public var blocked: Bool
     public var blockedReason: String?
+    /// 该密钥供给的宿主模型（由服务层写入；dry-run 阶段即可核对）
+    public var suppliedModels: [HostModelInventory.Binding] = []
 
     /// 掩码后的差异（供 CLI 与界面默认展示，避免明文外泄）
     public func redactedDiff(secret: String) -> [DiffLine] {
@@ -649,71 +670,60 @@ public final class InjectionEngine {
     }
 
     /// 同步更新 Codex 桌面端的 model_catalog_json 与 model_providers，确保下拉菜单立即可见
+    ///
+    /// v1.4.0 起模型清单与网关地址**不再硬编码**：全部取自网关自己的配置
+    /// （`~/.config/codex-gateway/config.json`，见 `GatewayConfig`）。
+    /// 此前的实现内嵌了一段 Python 并写死两个 slug 与绝对路径，
+    /// 导致「网关新增模型」必须改代码、换机器时路径失效。
     private static func syncCodexModelCatalogIfAvailable(keyRecord: KeyRecord) {
         let configPath = KeyInjectorService.defaultCodexConfigPath()
         let catalogPath = KeyInjectorService.defaultCodexCatalogPath()
         let fm = FileManager.default
         guard fm.fileExists(atPath: configPath) else { return }
 
-        // 1. 确保 codex-gateway-models.json 存在
-        if !fm.fileExists(atPath: catalogPath) {
-            let bundledCmd = "/Applications/ChatGPT.app/Contents/Resources/codex"
-            if fm.fileExists(atPath: bundledCmd) {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                p.arguments = ["-c", """
-import json, subprocess
-from pathlib import Path
-try:
-    raw = subprocess.check_output(['/Applications/ChatGPT.app/Contents/Resources/codex', 'debug', 'models', '--bundled'], text=True)
-    models = json.loads(raw).get('models', [])
-    template = next((m for m in models if m.get('slug') == 'gpt-5.6-luna'), models[0])
-    for cm in [
-        {'slug': 'ark/DeepSeek-V4.1-Flash', 'display_name': 'DeepSeek V4.1（公司网关）', 'priority': 100},
-        {'slug': 'gemini-3.8-flash-high', 'display_name': 'Gemini 3.8 Flash（公司网关）', 'priority': 99}
-    ]:
-        entry = json.loads(json.dumps(template))
-        entry['slug'] = cm['slug']
-        entry['display_name'] = cm['display_name']
-        entry['visibility'] = 'list'
-        entry['supported_in_api'] = True
-        entry['priority'] = cm['priority']
-        models.insert(0, entry)
-    Path('\(catalogPath)').write_text(json.dumps({'models': models}, ensure_ascii=False, indent=2), encoding='utf-8')
-except Exception:
-    pass
-"""]
-                try? p.run()
-                p.waitUntilExit()
-            }
+        let existingConfig = try? String(contentsOfFile: configPath, encoding: .utf8)
+        let gateway = GatewayConfig.loadOrEmpty()
+
+        // 1. 确保 codex-gateway-models.json 里有网关声明的全部模型
+        let existingEntries = CodexCatalogStore.allRaw(path: catalogPath)
+        if let outcome = try? HostConfigSync.syncCodexCatalog(gateway: gateway, existingEntries: existingEntries),
+           outcome.changed {
+            try? CodexCatalogStore.write(outcome.entries, path: catalogPath)
+        } else if existingEntries.isEmpty, fm.fileExists(atPath: catalogPath) {
+            // 目录存在但读不出条目：不去编造内容，留给显式同步处理
         }
 
-        // 2. 确保 config.toml 包含 model_catalog_json 注册
-        if let text = try? String(contentsOfFile: configPath, encoding: .utf8) {
+        // 2. 确保 config.toml 包含 model_catalog_json 注册与网关 provider 段
+        if let text = existingConfig {
             var updated = text
             if !updated.contains("model_catalog_json") {
                 updated = "model_catalog_json = \"\(catalogPath)\"\n" + updated
             }
             if !updated.contains("[model_providers.codex_gateway]") {
-                let base = keyRecord.baseURL ?? "http://192.168.1.200:8080/v1"
-                let block = """
+                // 地址与二进制路径优先取网关配置；两者都拿不到时如实用密钥里的自定义地址，
+                // 仍然拿不到就跳过写入——绝不写一个猜出来的地址进用户配置。
+                let base = gateway.baseURL.isEmpty ? (keyRecord.baseURL ?? "") : gateway.baseURL
+                let binary = GatewayConfig.binaryPath(codexConfigText: updated)
+                if !base.isEmpty, let binary {
+                    let block = """
 
 # BEGIN CODEX-GATEWAY MANAGED
 [model_providers.codex_gateway]
 name = "Company AI Gateway"
 base_url = "\(base)"
 wire_api = "responses"
-request_max_retries = 2
-stream_max_retries = 2
+request_max_retries = 6
+stream_max_retries = 6
 
 [model_providers.codex_gateway.auth]
-command = "/Users/linqiyu/Documents/ChatGPT/对接gemini/bin/codex-gateway"
+command = "\(binary)"
 args = ["auth", "print"]
 timeout_ms = 5000
 refresh_interval_ms = 0
 # END CODEX-GATEWAY MANAGED
 """
-                updated = updated.trimmingCharacters(in: .whitespacesAndNewlines) + "\n" + block
+                    updated = updated.trimmingCharacters(in: .whitespacesAndNewlines) + "\n" + block
+                }
             }
             updated = Self.ensureCodexGatewayProviderRouting(updated, catalogPath: catalogPath)
             if updated != text {
@@ -753,7 +763,7 @@ refresh_interval_ms = 0
             return configText
         }
 
-        var body = removeManagedBlock(from: configText)
+        var body = strippedOfManagedMarkers(configText)
         body = removeTopLevelAssignment("model", from: body)
         body = removeTopLevelAssignment("model_provider", from: body)
         body = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -771,6 +781,72 @@ refresh_interval_ms = 0
         if insertAt < lines.count { insertion.append("") }
         lines.insert(contentsOf: insertion, at: insertAt)
         return lines.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    /// 把 Codex 配置里的 `model` 定为指定值，并确保 `model_provider = codex_gateway`。
+    ///
+    /// 与 `ensureCodexGatewayProviderRouting` 的区别：后者只在「当前模型属于网关」时才动手
+    /// （守护场景必须保守），本函数是用户显式点名要换模型，因此主动改写。
+    /// 依然只搬动 `model` 与 `model_provider` 两个键，其余设置字节不动。
+    public static func setCodexGatewayModel(_ model: String, in configText: String) -> String {
+        var body = strippedOfManagedMarkers(configText)
+        body = removeTopLevelAssignment("model", from: body)
+        body = removeTopLevelAssignment("model_provider", from: body)
+        body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let block = """
+        \(codexDesktopBlockStart)
+        model = "\(model)"
+        model_provider = "codex_gateway"
+        \(codexDesktopBlockEnd)
+        """
+        var lines = body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        // 插到第一个 `[section]` 之前，与既有受管区块的位置保持一致
+        let insertAt = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") }) ?? lines.count
+        var insertion = block.split(separator: "\n").map(String.init)
+        if insertAt < lines.count { insertion.append("") }
+        lines.insert(contentsOf: insertion, at: insertAt)
+        return lines.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    /// 清掉成段的孤儿 `# END` 标记。
+    ///
+    /// 只处理「标记行」本身：连续出现的纯标记行会被整段删除；
+    /// 一行里既有标记又有别的内容时不动它（宁可少删也不误删）。
+    /// 清掉孤儿 `# END` 标记，并把受管区块整体剥掉（含 BEGIN/END 与块内内容）。
+    ///
+    /// `setCodexGatewayModel` 用「先剥干净、再重建一个干净区块」的方式保证幂等：
+    /// 而不是去猜哪些标记是孤儿——真实形态 `END / BEGIN / 内容 / END` 证明猜测法不可靠
+    /// （实测删掉「正确」的那个反而留下一个没有 BEGIN 的 END）。
+    /// 区块内只有 `model` 与 `model_provider` 两行，且都会立刻被重建，
+    /// 因此「整体剥掉」不会丢任何用户设置。
+    static func strippedOfManagedMarkers(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        var kept: [String] = []
+        var insideBlock = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == codexDesktopBlockStart {
+                // 孤儿 BEGIN（后面没有 END）只能删到「BEGIN 行 + 紧跟的注释行」，
+                // 因为块内那两行 `model` / `model_provider` 由 removeTopLevelAssignment 处理，
+                // 而更后面的内容很可能是用户自己的 [section] 设置——绝不能一并吞掉。
+                insideBlock = true
+                continue
+            }
+            if trimmed == codexDesktopBlockEnd {
+                insideBlock = false
+                continue
+            }
+            if insideBlock {
+                // 只跳过注释与被托管的赋值行，遇到 section 或其它设置立即退出块状态
+                if trimmed.hasPrefix("#") || trimmed.hasPrefix("model =") || trimmed.hasPrefix("model_provider =") {
+                    continue
+                }
+                insideBlock = false
+            }
+            kept.append(line)
+        }
+        return kept.joined(separator: "\n")
     }
 
     /// 修复历史遗留的孤儿受管标记。
@@ -840,31 +916,22 @@ refresh_interval_ms = 0
     /// `# END CODEX-GATEWAY DESKTOP` 这类注释行，若只按结束标记匹配就会留下孤儿标记，
     /// 导致修复后的配置里出现两个 BEGIN。这里改为「从 BEGIN 行起，向后吃掉紧跟的注释行与空行」。
     static func removeManagedBlock(from text: String) -> String {
-        guard var start = text.range(of: codexDesktopBlockStart) else { return text }
-        var result = text
-        // 若上方还残留「未闭合 BEGIN + 注释」的孤儿标记，先整体清理掉
-        while let earlier = text.range(of: codexDesktopBlockStart, range: text.startIndex..<start.lowerBound) {
-            start = earlier
+        // 先剥掉成对的受管区块（含块内的 model/model_provider），
+        // 剩下的孤儿标记由下面的循环按保守口径处理。
+        let lines = strippedOfManagedMarkers(text).components(separatedBy: "\n")
+        guard let begin = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == codexDesktopBlockStart
+        }) else { return lines.joined(separator: "\n") }
+
+        // 孤儿 BEGIN：连它后面紧跟的注释行一起移除（块内的赋值行由 removeTopLevelAssignment 清理）
+        var removalEnd = begin + 1
+        while removalEnd < lines.count,
+              lines[removalEnd].trimmingCharacters(in: .whitespaces).hasPrefix("#") {
+            removalEnd += 1
         }
-        var removalEnd = result.index(after: start.upperBound)
-        // 独占一行的 BEGIN 标记本身
-        if let lineEnd = result.range(of: "\n", range: start.upperBound..<result.endIndex) {
-            removalEnd = lineEnd.upperBound
-        }
-        // 继续吞掉紧跟的注释行、空行，以及（若存在）END 标记
-        var cursor = removalEnd
-        while cursor < result.endIndex {
-            let lineEnd = result.range(of: "\n", range: cursor..<result.endIndex)?.upperBound ?? result.endIndex
-            let line = result[cursor..<lineEnd].trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.hasPrefix("#") || line.isEmpty {
-                removalEnd = lineEnd
-                cursor = lineEnd
-                continue
-            }
-            break
-        }
-        result.removeSubrange(start.lowerBound..<removalEnd)
-        return result
+        var kept = lines
+        kept.removeSubrange(begin..<removalEnd)
+        return kept.joined(separator: "\n")
     }
 
     /// 删除顶层（首个 `[section]` 之前）的某个键赋值行

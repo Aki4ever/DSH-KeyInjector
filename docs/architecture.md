@@ -1,6 +1,7 @@
-# 架构说明 — KeyInjector · Key 注入器
+# 架构说明 — KeyInjector · 账号管理器
 
-> **实施版本**：`v1.3.0`　|　**更新日期**：2026-09-22
+> **实施版本**：`v2.0.0`　|　**更新日期**：2026-09-22
+> **本版要点**：显示层改名为「账号管理器」（内部包名 / CLI 命令保持不变）；新增模型三维度（名称 / 剩余额度 / 更新时间）的数据通路；「模型清单」页并入「密钥」页。
 
 ---
 
@@ -8,7 +9,7 @@
 
 ```text
 ┌──────────────────────── 表现层 ────────────────────────┐
-│  Key注入器.app (AppKit 外壳)        keyinject (CLI)     │
+│  账号管理器.app (AppKit 外壳)       keyinject (CLI)     │
 │   ├─ AppDelegate 窗口与菜单          ├─ 参数解析          │
 │   ├─ Bridge (JS ↔ Swift 桥接)        ├─ 人类可读输出      │
 │   └─ WKWebView ← web/ 前端资源        └─ --json 结构化输出 │
@@ -18,11 +19,15 @@
 │  KeyInjectorService                                     │
 │   provider/target 查询 · 密钥增删改查 · 计划 · 应用      │
 │   回滚 · 探测 · 审计查询 · 运行时信息                    │
+│   ├─ EndpointProtocol：端点级鉴权适配（Gemini 兼容端点） │
+│   └─ runDiscovery：模型段 + 额度段两段独立取证           │
 └──────────────────────┬─────────────────────────────────┘
 ┌──────────────────────▼───── 领域层 ────────────────────┐
 │  KeyVault       InjectionEngine      HealthChecker      │
 │  AuditLog       ContentPatcher       ProviderCatalog    │
 │  AtomicWriter   BackupStore          TargetCatalog      │
+│  DshModelCatalog HostModelInventory  CodexCatalogStore   │
+│  ModelDiscovery  ModelMetadata · BalanceInfo · 端点候选  │
 └──────────────────────┬─────────────────────────────────┘
 ┌──────────────────────▼───── 基础层 ────────────────────┐
 │  SecretStore 协议：Keychain / File(ChaChaPoly) / Memory │
@@ -72,7 +77,105 @@
 
 ---
 
-## 三、关键设计决策
+## 三、宿主模型清单与密钥供给（v1.4.0）
+
+```text
+读取（全部只读，绝不写入宿主配置）
+  ├─ DSH：harness/settings.yaml
+  │    ├─ 缩进敏感解析 llm-pi-ai.providers.<id> → apiKeyEnv / baseURL / models[].id
+  │    └─ harness/.credentials.yaml → refs 键名占用情况（只读键名，不读明文）
+  └─ Codex：~/.codex/codex-gateway-models.json（网关条目）
+       └─ ~/.codex/config.toml → [model_providers.codex_gateway].base_url
+
+归一
+  └─ ModelIdentity.normalize：剥掉 ark/ ds/ openai/ google/ anthropic/ 等命名空间前缀
+       → DS/DeepSeek V4.1 Flash ≡ ark/DeepSeek-V4.1-Flash（同一模型的两个别名）
+
+绑定（密钥 → 模型，命中其一即绑定）
+  ├─ 依据① 凭据键名：宿主 apiKeyEnv 命中密钥厂商环境变量名或落点键名
+  └─ 依据② 端点同源：宿主 baseURL ≡ 密钥自定义 Base URL
+       → 两条都不命中：如实显示「未绑定」，不做猜测
+
+消费
+  ├─ 密钥库：每张密钥卡内嵌「供给模型」区块（按宿主分组，默认折叠）
+  ├─ 模型清单页：跨宿主总览 + Codex 网关条目写入管理区（虚线分区，与只读清单隔开）
+  └─ CLI：keyinject hosts list | hosts keys | keys（均带供给模型）
+```
+
+**反例边界**：注入器不写 `settings.yaml`。该文件含 onboarding、权限预设、默认模型等
+非本工具所有的字段，任何「顺手规范化 YAML」都会破坏用户既有配置，因此只读是硬约束。
+
+---
+
+### 3.4 单一事实源：网关配置 → 两个客户端（v1.6.0）
+
+```
+~/.config/codex-gateway/config.json     ← 唯一权威（网关自己写的，不是本工具写的）
+        │  base_url + models: { 线路名: 上游模型名 }
+        ▼
+  GatewayConfig.load()                  ← 全部读取都经此，代码里不再出现任何模型名
+        │
+        ├─ HostConfigSync.patchDshModels()   → DSH settings.yaml 的 models: 列表
+        ├─ HostConfigSync.syncCodexCatalog() → ~/.codex/codex-gateway-models.json
+        └─ keyinject gateway switch           → ~/.codex/config.toml 的 model / model_provider
+```
+
+**为什么是网关配置而不是本工具的登记表**：模型清单的**生产者**是网关——线路名到上游模型的映射
+写在网关自己的配置里，网关启动时读的就是它。任何在客户端侧另存一份名单的做法，
+都注定要在网关变更后人工同步。因此本工具把「读网关配置」定为唯一入口。
+
+**降级姿势（宁可什么都不做，也不要写错）**：
+- 网关配置读不到 / 格式不识别 → `isUsable == false`，同步整体跳过并告警，**不猜测模型名**；
+- 网关二进制找不到 → 按「已登记的 `auth.command` → `CODEX_GATEWAY_BIN` → 常见位置 → `PATH`」
+  依次探测，全都拿不到就不做依赖它的写入。
+
+**默认只增不减**：`MergeMode.merge`（默认）对既有 YAML 行零字节改写，只插入缺失条目；
+`MergeMode.replace`（`keyinject sync --prune`）才会删除。这条边界不是洁癖——
+实测按「以网关为准整体替换」会删掉本机 3 个在用模型。
+
+**写入安全**：定点改写 + 每次写入前自动备份到
+`~/Library/Application Support/KeyInjector/backups/<目标名>/<时间戳>-<文件名>`。
+
+---
+
+### 3.5 模型发现：从「这把 Key 能提供什么」到界面（v1.6.0）
+
+用户要的是「密钥库里就能看出这把 key 有什么模型可用」。数据来源按可信度从高到低逐级兜底，
+每一级都有明确的可信度标注，**任何一级都不猜测后当作事实**：
+
+```
+T1 端点探测   GET {baseURL}{probePath}/models        ← 优先该 Key 自定义 Base URL
+      ↓ 失败（404 / 非 JSON / 超时 / 鉴权失败）
+T2 端点变体   /models、/v1/models、去掉 /v1 的变体、厂商 healthPath
+      ↓ 全部失败
+T3 响应解析   OpenAI data[] · Gemini models[].name · Ollama models[].name · 裸数组 · 键值映射
+      ↓ 解析不到任何模型
+T4 宿主映射   HostModelInventory.bindings（凭据键名 + 端点同源）   ← 可信度：宿主声明
+      ↓ 无绑定
+T5 名称推断   仅当「供应商相符 / 端点同域 / 宿主完全未声明且无任何记录」才产出  ← 可信度：推断
+      ↓
+仍未识别     界面如实说明「端点探测未成功，且宿主没有声明绑定」并给出失败原因
+```
+
+**绑定规则的三条依据（T4 的安全护栏）**：① 凭据键名命中**且端点同源**；② 端点同源；
+③ 凭据名出自该 Key 自身厂商**且**该模型端点在厂商官方域名下。
+
+> 反例（实测踩坑）：仅凭「落点键名同名」就把跨厂商模型算到这把 Key 头上，
+> 曾让 Gemini Key 声称「供给公司网关 5 个模型」——而它的端点与网关毫无关系。
+> 这类误绑是**静默误导**：用户会以为「换这把 Key 也能用这些模型」。因此护栏不可放松。
+
+**缓存与联网边界**：
+- 结果存 `model-cache.json`（键为 key id，含指纹、来源、端点、HTTP 码、时间、模型列表），
+  权限 0600，**不含明文**；key 删除时同步清理。
+- 打开密钥库时**只读缓存、不联网**；真实请求只发生在显式点击「识别模型」或 CLI 调用时。
+- `KeyRecord.modelBindings` 仍是派生字段（自定义 `CodingKeys` 排除），`vault.json` 结构零变更。
+
+**前端消费口径**：分区视图直接消费后端 `keysGrouped`，与 CLI `keyinject keys --grouped` 同一份数据，
+避免界面与命令行出现两套分组逻辑。
+
+---
+
+## 四、关键设计决策
 
 | 决策 | 选择 | 理由 |
 | :--- | :--- | :--- |
@@ -84,10 +187,14 @@
 | 明文暴露控制 | **掩码 + 指纹为默认，明文需显式开关** | 降低截屏、日志、会话上下文泄漏风险 |
 | 备份命名 | **毫秒时间戳 + 冲突自增后缀** | 早期用秒级时间戳导致同秒连续备份互相覆盖（真实缺陷，已修复并加回归测试） |
 | 配置可覆盖 | **数据目录 JSON 覆盖内置预设** | 第三方工具路径随版本变化，不能让用户等新版本发布 |
+| 宿主模型清单 | **两个宿主各自读取，归一后汇总** | DSH 与 Codex 的模型来自两处完全不同的配置，不存在单一权威源；只读不写，避免破坏用户配置 |
+| 落点键名 | **宿主声明优先，落点静态值仅回退** | DSH 落点曾硬编码 `DEEPSEEK_API_KEY` 而宿主实读 `MIDPRO_API_KEY`，造成「注入成功但宿主读不到」的静默失效 |
+| 密钥↔模型绑定 | **两条依据（凭据键名 / 端点同源），都不命中即不猜** | 宁可如实显示「未绑定」，也不把模型硬塞给某个密钥而误导用户 |
+| 派生数据落盘 | **`modelBindings` 排除在 Codable 之外** | 它由宿主配置实时算出，落盘会制造「配置改了但清单没更新」的脏数据；旧 `vault.json` 仍可解码 |
 
 ---
 
-## 四、数据文件
+## 五、数据文件
 
 数据根目录：`~/Library/Application Support/KeyInjector/`（可用环境变量 `KEYINJECTOR_HOME` 覆盖）
 
@@ -103,7 +210,7 @@
 
 ---
 
-## 五、安全闸门清单
+## 六、安全闸门清单
 
 以下情形一律**阻断写入并报错**，不做任何猜测性修复：
 
@@ -116,9 +223,9 @@
 
 ---
 
-## 六、测试策略
+## 七、测试策略
 
-- **38 项测试 / 10 个测试套件**，全部为行为级测试，使用真实临时目录与真实文件读写，不使用 mock 文件系统。
+- **92 项测试 / 20 个测试套件**，全部为行为级测试，使用真实临时目录与真实文件读写，不使用 mock 文件系统。
 - 唯一被替换的是网络层：`HTTPTransport` 协议 + 测试用 `MockTransport`，保证测试**绝不发出真实网络请求**。
 - 门禁脚本 `scripts/run_tests.sh` 显式传入测试宏插件路径（否则 SPM 增量编译会漏传导致误报失败），
   并在结束后检查测试摘要存在且无失败标记，否则返回非零退出码。
@@ -126,7 +233,7 @@
 
 ---
 
-## 七、已知技术债
+## 八、已知技术债
 
 | 编号 | 内容 | 影响 | 计划 |
 | :--- | :--- | :--- | :--- |

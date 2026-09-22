@@ -13,7 +13,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-APP_NAME="Key注入器"
+APP_NAME="账号管理器"
 EXECUTABLE_NAME="KeyInjector"
 BUNDLE_ID="com.aki4ever.keyinjector"
 BUILD_NUMBER="1"
@@ -68,6 +68,19 @@ if [ -f "$BIN_PATH/keyinject" ]; then
   cp "$BIN_PATH/keyinject" "$CONTENTS/Resources/bin/keyinject"
   chmod +x "$CONTENTS/Resources/bin/keyinject"
   echo "✅ 已内置命令行工具: Contents/Resources/bin/keyinject"
+
+  # 5b. 刷新稳定路径 ~/.local/bin/keyinject
+  #
+  # 为什么必须在这里做：launchd 常驻守护（com.aki4ever.keyinjector.gateway-guard）
+  # 每 10 秒执行的就是这个路径下的 keyinject。如果它不随构建更新，
+  # 守护会一直用旧二进制，行为与新版本不一致——用户完全看不到这个「静默漂移」。
+  # 跳过方式：KEYINJECTOR_NO_CLI_LINK=1 bash scripts/build_app.sh
+  if [ "${KEYINJECTOR_NO_CLI_LINK:-0}" != "1" ]; then
+    mkdir -p "$HOME/.local/bin"
+    cp "$BIN_PATH/keyinject" "$HOME/.local/bin/keyinject"
+    chmod +x "$HOME/.local/bin/keyinject"
+    echo "✅ 已刷新稳定路径: ~/.local/bin/keyinject（launchd 守护使用的就是它）"
+  fi
 fi
 
 # 6. Info.plist

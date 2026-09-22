@@ -24,14 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "关于 Key 注入器",
+        appMenu.addItem(withTitle: "关于账号管理器",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "隐藏 Key 注入器",
+        appMenu.addItem(withTitle: "隐藏账号管理器",
                         action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "退出 Key 注入器",
+        appMenu.addItem(withTitle: "退出账号管理器",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Key 注入器"
+        window.title = "账号管理器"
         window.minSize = NSSize(width: 1020, height: 660)
         // 指定了 KEYINJECTOR_WINDOW_RECT 时不居中，保证自动化截图位置可复现
         if envRect == nil { window.center() }
@@ -163,10 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let demoPath = ProcessInfo.processInfo.environment["KEYINJECTOR_SNAPSHOT_DEMO_FILE"] ?? ""
 
         let steps: [(name: String, script: String, delay: Double)] = [
-            ("Page_KeyInjector_Keys_Default", "window.__selectPage('keys')", 1.0),
-            ("Page_KeyInjector_Keys_AddDialog", "window.__openAddKeyModal()", 1.0),
+            ("Page_KeyInjector_Keys_Default", "window.__clearBanner(); window.__selectPage('keys')", 1.4),
+            ("Page_KeyInjector_Keys_ModelsExpanded", "window.__expandKeyModels()", 1.0),
+            ("Page_KeyInjector_Keys_Detail", "window.__openKeyDetail()", 1.4),
+            ("Page_KeyInjector_Keys_AddDialog", "window.__closeKeyDetail(); window.__openAddKeyModal()", 1.0),
+            // 模型清单页需要等两次桥接往返（跨宿主清单 + 网关同步计划 + Codex 写入区），故给更长延迟
+            ("Page_KeyInjector_Models_Default", "window.__closeAddKeyModal(); window.__clearBanner(); window.__selectPage('models')", 2.6),
             ("Page_KeyInjector_Inject_DryRun",
-             "window.__closeAddKeyModal(); window.__selectPage('inject'); window.__snapshotSetPath('\(demoPath)'); window.__snapshotPlan()", 1.8),
+             "window.__clearBanner(); window.__selectPage('inject'); window.__snapshotSetPath('\(demoPath)'); window.__snapshotPlan()", 1.8),
             ("Page_KeyInjector_Health_Default", "window.__selectPage('health')", 1.0),
             ("Page_KeyInjector_Audit_Default", "window.__selectPage('audit')", 1.0),
             ("Page_KeyInjector_Settings_Default", "window.__selectPage('settings')", 1.0)
@@ -181,7 +185,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                 return
             }
             let step = steps[index]
-            webView.evaluateJavaScript(step.script) { _, _ in
+            webView.evaluateJavaScript(step.script) { _, scriptError in
+                if let scriptError {
+                    FileHandle.standardError.write(Data("STEP_ERR \(step.name): \(scriptError)\n".utf8))
+                }
+                self.webView.evaluateJavaScript("document.title") { value, _ in
+                    FileHandle.standardError.write(Data("TITLE \(step.name) => \(value ?? "nil")\n".utf8))
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + step.delay) { [weak self] in
                     guard let self else { return }
                     self.webView.takeSnapshot(with: nil) { image, _ in

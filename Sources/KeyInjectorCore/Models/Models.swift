@@ -17,6 +17,13 @@ public struct Provider: Codable, Hashable, Identifiable, Sendable {
     public var baseURL: String?
     /// 健康探测路径（相对 baseURL），nil 表示该厂商不支持探测
     public var healthPath: String?
+    /// 账号余额接口路径（相对 baseURL）。
+    ///
+    /// 为什么必须放在厂商预设里：余额维度**只有部分厂商提供**（当前实测仅
+    /// DeepSeek 的 `GET /user/balance`），若不给每个厂商显式声明，代码就只能
+    /// 对所有厂商请求同一个路径，必然产生一串 404 噪声。nil 表示「该协议不提供」，
+    /// 界面据此如实标注而不是显示空白。
+    public var balancePath: String?
     /// 密钥申请控制台地址
     public var consoleURL: String?
     /// 已知密钥前缀，用于录入时的格式预检（如 `sk-`）
@@ -34,6 +41,7 @@ public struct Provider: Codable, Hashable, Identifiable, Sendable {
         envKeys: [String],
         baseURL: String? = nil,
         healthPath: String? = nil,
+        balancePath: String? = nil,
         consoleURL: String? = nil,
         secretPrefixes: [String] = [],
         authStyle: AuthStyle = .bearer,
@@ -45,6 +53,7 @@ public struct Provider: Codable, Hashable, Identifiable, Sendable {
         self.envKeys = envKeys
         self.baseURL = baseURL
         self.healthPath = healthPath
+        self.balancePath = balancePath
         self.consoleURL = consoleURL
         self.secretPrefixes = secretPrefixes
         self.authStyle = authStyle
@@ -94,6 +103,16 @@ public struct KeyRecord: Codable, Hashable, Identifiable, Sendable {
     public var updatedAt: Date
     /// 最近一次健康探测结果
     public var lastCheck: CheckSummary?
+    /// 该密钥供给的宿主模型（**派生字段，不落盘、不参与编解码**）。
+    ///
+    /// 之所以排除在 Codable 之外：它是每次读取时根据宿主配置实时算出来的，
+    /// 存进 `vault.json` 只会制造「配置改了但清单没更新」的脏数据。
+    /// 旧版 `vault.json`（无此键）解码时保持空数组，因此不触发任何数据迁移。
+    public var modelBindings: [HostModelInventory.Binding] = []
+
+    enum CodingKeys: String, CodingKey {
+        case id, providerID, label, hint, fingerprint, enabled, priority, tags, note, baseURL, createdAt, updatedAt, lastCheck
+    }
 
     public init(
         id: String = UUID().uuidString,
@@ -123,6 +142,7 @@ public struct KeyRecord: Codable, Hashable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastCheck = lastCheck
+        self.modelBindings = []
     }
 }
 
@@ -280,6 +300,7 @@ public enum AuditAction: String, Codable, Sendable {
     case inject
     case rollback
     case healthCheck
+    case modelDiscovery
 
     public var label: String {
         switch self {
@@ -291,6 +312,7 @@ public enum AuditAction: String, Codable, Sendable {
         case .inject: return "执行注入"
         case .rollback: return "回滚配置"
         case .healthCheck: return "健康探测"
+        case .modelDiscovery: return "模型发现"
         }
     }
 }

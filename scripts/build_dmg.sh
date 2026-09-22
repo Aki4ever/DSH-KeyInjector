@@ -11,8 +11,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-APP_NAME="Key注入器"
-VOLUME_NAME="Key 注入器"
+APP_NAME="账号管理器"
+VOLUME_NAME="账号管理器"
 DIST_DIR="$PROJECT_DIR/dist"
 APP_DIR="$DIST_DIR/${APP_NAME}.app"
 
@@ -22,7 +22,7 @@ if [ ! -f "$PROJECT_DIR/VERSION" ]; then
   exit 1
 fi
 VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
-DMG_PATH="$DIST_DIR/KeyInjector-${VERSION}.dmg"
+DMG_PATH="$DIST_DIR/账号管理器-${VERSION}.dmg"
 STAGING="$DIST_DIR/dmg-staging"
 
 echo "=========================================================="
